@@ -48,4 +48,72 @@ SYSTEM_PROMPT = """
 """
 
 # ==========================================
-# 3. 網頁介
+# 3. 網頁介面
+# ==========================================
+st.set_page_config(page_title="QuestWiz 內湖國小版", layout="wide")
+st.title("🏫 QuestWiz 行政自動化命題系統")
+
+with st.sidebar:
+    st.header("🔑 系統設定")
+    api_key = st.text_input("輸入 Gemini API Key", type="password")
+    st.divider()
+    st.info("💡 系統已開啟「自動節數偵測」，AI 將自行從上傳的審核表或教材中計算配分。")
+
+if "chat_session" not in st.session_state:
+    st.session_state.chat_session = None
+    st.session_state.chat_history = []
+
+if not st.session_state.chat_history:
+    with st.container(border=True):
+        col1, col2 = st.columns(2)
+        with col1:
+            grade = st.selectbox("年級", ["一年級", "二年級", "三年級", "四年級", "五年級", "六年級"], index=4)
+            subject = st.selectbox("科目", ["自然科學", "國語", "數學", "社會"], index=0)
+        with col2:
+            mode = st.radio("試卷模式", ["🟢 適中 (標準)", "🌟 素養 (國際標準)"], index=1)
+
+        st.markdown("---")
+        # 多檔上傳
+        uploaded_files = st.file_uploader("上傳教材或舊版審核表 (支援 PDF, Word, CSV, 圖片)", 
+                                         type=["pdf", "docx", "doc", "csv", "xlsx", "jpg", "png"], 
+                                         accept_multiple_files=True)
+        
+        start_btn = st.button("🚀 自動分析並產生審核表", type="primary", use_container_width=True)
+
+    if start_btn and api_key and uploaded_files:
+        all_text = ""
+        imgs = []
+        for f in uploaded_files:
+            ext = f.name.split('.')[-1].lower()
+            if ext == 'pdf': all_text += f"\n[檔案:{f.name}]\n" + read_pdf(f)
+            elif ext == 'docx': all_text += f"\n[檔案:{f.name}]\n" + read_docx(f)
+            elif ext == 'csv': all_text += f"\n[資料表:{f.name}]\n" + read_csv(f)
+            elif ext in ['jpg', 'png', 'jpeg']: imgs.append(Image.open(f))
+        
+        user_msg = f"科目：{subject}\n年級：{grade}\n模式：{mode}\n任務：請自動從上傳資料中抓取各單元節數並計算 100 分之配分比例。\n資料內容：{all_text}"
+        
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel("gemini-1.5-pro", system_instruction=SYSTEM_PROMPT)
+        chat = model.start_chat(history=[])
+        
+        with st.spinner("AI 正在掃描節數並計算配分權重..."):
+            response = chat.send_message([user_msg] + imgs)
+            st.session_state.chat_session = chat
+            st.session_state.chat_history.append({"role": "model", "content": response.text})
+            st.rerun()
+
+else:
+    for msg in st.session_state.chat_history:
+        with st.chat_message("ai" if msg["role"] == "model" else "user"):
+            st.markdown(msg["content"])
+
+    if prompt := st.chat_input("確認審核表與配分比例無誤請輸入「開始出題」..."):
+        with st.chat_message("user"): st.markdown(prompt)
+        res = st.session_state.chat_session.send_message(prompt)
+        st.session_state.chat_history.append({"role": "user", "content": prompt})
+        st.session_state.chat_history.append({"role": "model", "content": res.text})
+        st.rerun()
+
+    if st.button("🔄 重新設定 (新試卷)"):
+        st.session_state.chat_history = []
+        st.rerun()
