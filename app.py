@@ -8,7 +8,7 @@ import pandas as pd
 import io
 
 # ==========================================
-# 1. 增強型檔案處理工具 (加入 CSV 支援)
+# 1. 檔案處理工具 (加入 CSV 與 Excel 支援)
 # ==========================================
 def read_pdf(file):
     pdf_reader = PyPDF2.PdfReader(file)
@@ -21,11 +21,21 @@ def read_docx(file):
 def read_csv(file):
     try:
         df = pd.read_csv(file)
-        return df.to_string() # 將表格轉為純文字讓 AI 讀取
+        return df.to_string()
     except: return "[CSV讀取失敗]"
 
+def read_excel(file):
+    try:
+        # 讀取 Excel 的所有分頁
+        all_sheets = pd.read_excel(file, sheet_name=None)
+        combined_text = ""
+        for sheet_name, df in all_sheets.items():
+            combined_text += f"\n分頁: {sheet_name}\n{df.to_string()}\n"
+        return combined_text
+    except: return "[Excel讀取失敗]"
+
 # ==========================================
-# 2. 進化版 System Prompt (強調自動抓取節數)
+# 2. 進化版 System Prompt
 # ==========================================
 SYSTEM_PROMPT = """
 你是「內湖國小專用命題與審核 AI」。
@@ -73,8 +83,7 @@ if not st.session_state.chat_history:
             mode = st.radio("試卷模式", ["🟢 適中 (標準)", "🌟 素養 (國際標準)"], index=1)
 
         st.markdown("---")
-        # 多檔上傳
-        uploaded_files = st.file_uploader("上傳教材或舊版審核表 (支援 PDF, Word, CSV, 圖片)", 
+        uploaded_files = st.file_uploader("上傳教材或舊版審核表 (支援 PDF, Word, CSV, Excel, 圖片)", 
                                          type=["pdf", "docx", "doc", "csv", "xlsx", "jpg", "png"], 
                                          accept_multiple_files=True)
         
@@ -88,24 +97,27 @@ if not st.session_state.chat_history:
             if ext == 'pdf': all_text += f"\n[檔案:{f.name}]\n" + read_pdf(f)
             elif ext == 'docx': all_text += f"\n[檔案:{f.name}]\n" + read_docx(f)
             elif ext == 'csv': all_text += f"\n[資料表:{f.name}]\n" + read_csv(f)
+            elif ext == 'xlsx': all_text += f"\n[Excel:{f.name}]\n" + read_excel(f)
             elif ext in ['jpg', 'png', 'jpeg']: imgs.append(Image.open(f))
         
         user_msg = f"科目：{subject}\n年級：{grade}\n模式：{mode}\n任務：請自動從上傳資料中抓取各單元節數並計算 100 分之配分比例。\n資料內容：{all_text}"
         
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel(
-        model_name="models/gemini-1.5-pro", 
-        system_instruction=SYSTEM_PROMPT
-    )
-except Exception as e:
-    st.error(f"模型初始化失敗，請檢查 API Key 或模型權限。錯誤資訊：{e}")
-        chat = model.start_chat(history=[])
-        
-        with st.spinner("AI 正在掃描節數並計算配分權重..."):
-            response = chat.send_message([user_msg] + imgs)
-            st.session_state.chat_session = chat
-            st.session_state.chat_history.append({"role": "model", "content": response.text})
-            st.rerun()
+        # 初始化模型與對話
+        try:
+            genai.configure(api_key=api_key)
+            model = genai.GenerativeModel(
+                model_name="models/gemini-1.5-pro", 
+                system_instruction=SYSTEM_PROMPT
+            )
+            chat = model.start_chat(history=[])
+            
+            with st.spinner("AI 正在掃描節數並計算配分權重..."):
+                response = chat.send_message([user_msg] + imgs)
+                st.session_state.chat_session = chat
+                st.session_state.chat_history.append({"role": "model", "content": response.text})
+                st.rerun()
+        except Exception as e:
+            st.error(f"啟動失敗，請檢查 API Key。錯誤資訊：{e}")
 
 else:
     for msg in st.session_state.chat_history:
@@ -114,12 +126,15 @@ else:
 
     if prompt := st.chat_input("確認審核表與配分比例無誤請輸入「開始出題」..."):
         with st.chat_message("user"): st.markdown(prompt)
-        res = st.session_state.chat_session.send_message(prompt)
-        st.session_state.chat_history.append({"role": "user", "content": prompt})
-        st.session_state.chat_history.append({"role": "model", "content": res.text})
-        st.rerun()
+        try:
+            res = st.session_state.chat_session.send_message(prompt)
+            st.session_state.chat_history.append({"role": "user", "content": prompt})
+            st.session_state.chat_history.append({"role": "model", "content": res.text})
+            st.rerun()
+        except Exception as e:
+            st.error(f"連線中斷：{e}")
 
     if st.button("🔄 重新設定 (新試卷)"):
         st.session_state.chat_history = []
+        st.session_state.chat_session = None
         st.rerun()
-
