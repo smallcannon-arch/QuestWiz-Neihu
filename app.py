@@ -20,7 +20,7 @@ SUBJECT_Q_TYPES = {
     "": ["單選題", "是非題", "填充題", "簡答題"]
 }
 
-# --- 2. 檔案讀取與工具 (快取優化) ---
+# --- 2. 檔案讀取工具 ---
 @st.cache_data
 def extract_text_from_files(files):
     text_content = ""
@@ -42,13 +42,10 @@ def extract_text_from_files(files):
     return text_content
 
 def process_table_data(md_text):
-    """強力解析 Markdown 表格並轉為 DataFrame"""
     try:
         cleaned = md_text.replace("｜", "|").replace("**", "").replace("||", "|\n|")
-        # 尋找標題錨點
         header_match = re.search(r'\|\s*單元名稱\s*\|\s*學習目標.*\|\s*對應題型\s*\|\s*預計配分\s*\|', cleaned)
         if not header_match: return None
-        # 智慧切分
         raw_cells = [c.strip() for c in cleaned[header_match.start():].split('|') if c.strip() and '---' not in c]
         num_cols = 4 
         if len(raw_cells) < num_cols: return None
@@ -60,8 +57,20 @@ def process_table_data(md_text):
         return pd.DataFrame(rows, columns=headers)
     except: return None
 
+# --- 3. 智能模型尋找器 ---
+def find_available_model(api_key, keyword="flash"):
+    """自動偵測 API Key 下可用的模型名稱"""
+    genai.configure(api_key=api_key)
+    try:
+        # 列出所有支援內容生成的模型
+        available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        # 優先找包含關鍵字 (如 flash 或 pro) 的模型
+        target = next((m for m in available_models if keyword in m.lower()), available_models[0])
+        return target, None
+    except Exception as e:
+        return None, str(e)
+
 def generate_with_retry(model_or_chat, prompt, stream=True):
-    """對應 429 錯誤的自動重試機制"""
     max_retries = 3
     for i in range(max_retries):
         try:
@@ -75,7 +84,7 @@ def generate_with_retry(model_or_chat, prompt, stream=True):
             else: raise e
     raise Exception("重試次數過多")
 
-# --- 3. 介面設計 ---
+# --- 4. 介面視覺設計 ---
 st.set_page_config(page_title="內湖國小 AI 輔助出題系統", layout="wide")
 
 st.markdown("""
@@ -136,33 +145,41 @@ if st.session_state.phase == 1:
             if not api_input or not grade or not subject or not uploaded_files:
                 st.warning("⚠️ 請補齊 API Key、參數或教材。")
             else:
-                with st.spinner("⚡ 正在極速掃描教材並原文提取學習目標..."):
-                    genai.configure(api_key=api_input.strip())
-                    content = extract_text_from_files(uploaded_files)
-                    try:
-                        model = genai.GenerativeModel("gemini-1.5-flash", system_instruction="你僅產出表格，欄位：| 單元名稱 | 學習目標(原文) | 對應題型 | 預計配分 |。絕對禁止出題！")
-                        st.session_state.last_prompt_content = f"年級：{grade}, 科目：{subject}\n題型：{'、'.join(selected_types)}\n命題模式：{mode}\n教材：{content}"
-                        
-                        with st.chat_message("ai"):
-                            placeholder = st.empty()
-                            full_res = ""
-                            res = generate_with_retry(model, st.session_state.last_prompt_content)
-                            for chunk in res:
-                                full_res += chunk.text
-                                placeholder.markdown(full_res + "▌")
-                            placeholder.markdown(full_res)
-                        
-                        st.session_state.chat_history.append({"role": "model", "content": full_res})
-                        st.session_state.phase = 2
-                        st.rerun()
-                    except Exception as e: st.error(f"連線失敗：{e}")
+                with st.spinner("⚡ 正在搜尋可用模型並分析教材..."):
+                    target_key = api_input.strip()
+                    # 關鍵修正：自動尋找正確的模型字串
+                    model_name, error = find_available_model(target_key, "flash")
+                    
+                    if error:
+                        st.error(f"❌ 無法讀取模型清單，請確認 API Key 是否有效：{error}")
+                    else:
+                        content = extract_text_from_files(uploaded_files)
+                        try:
+                            st.toast(f"✅ 已偵測可用模型：{model_name}")
+                            model = genai.GenerativeModel(model_name, system_instruction="你僅產出表格，欄位：| 單元名稱 | 學習目標(原文) | 對應題型 | 預計配分 |。絕對禁止出題！")
+                            chat = model.start_chat(history=[])
+                            prompt = f"年級：{grade}, 科目：{subject}\n題型：{'、'.join(selected_types)}\n命題模式：{mode}\n教材：{content}"
+                            st.session_state.last_prompt_content = prompt
+                            
+                            with st.chat_message("ai"):
+                                placeholder = st.empty()
+                                full_res = ""
+                                res = generate_with_retry(chat, prompt)
+                                for chunk in res:
+                                    full_res += chunk.text
+                                    placeholder.markdown(full_res + "▌")
+                                placeholder.markdown(full_res)
+                            
+                            st.session_state.chat_history.append({"role": "model", "content": full_res})
+                            st.session_state.phase = 2
+                            st.rerun()
+                        except Exception as e: st.error(f"連線失敗：{e}")
 
 # --- Phase 2: 確認與出題 ---
 elif st.session_state.phase == 2:
     current_md = st.session_state.chat_history[0]["content"]
     with st.chat_message("ai"): st.markdown(current_md)
     
-    # 下載按鈕區
     df = process_table_data(current_md)
     if df is not None:
         c_d1, c_d2 = st.columns(2)
@@ -178,36 +195,31 @@ elif st.session_state.phase == 2:
     st.divider()
     with st.container(border=True):
         st.markdown("### 📝 第二階段：正式出題")
-        st.caption("🧠 系統將換檔至 **Gemini 1.5 Pro** 以確保題目品質")
-        
         if st.button("✅ 確認無誤，開始出題", type="primary", use_container_width=True):
-            with st.spinner("🧠 深度命題中，請稍候..."):
-                genai.configure(api_key=api_input.strip())
-                model_pro = genai.GenerativeModel("gemini-1.5-pro", system_instruction="請根據審核表產出正式試卷與參考答案。")
+            with st.spinner("🧠 正在自動匹配最強模型並命題中..."):
+                target_key = api_input.strip()
+                # 自動找 Pro 模型
+                model_name_pro, error = find_available_model(target_key, "pro")
                 
-                with st.chat_message("ai"):
-                    placeholder = st.empty()
-                    full_res = ""
-                    res = generate_with_retry(model_pro, f"{st.session_state.last_prompt_content}\n---\n參考審核表：\n{current_md}\n\n請正式出題。")
-                    for chunk in res:
-                        full_res += chunk.text
-                        placeholder.markdown(full_res + "▌")
-                    placeholder.markdown(full_res)
-                st.session_state.chat_history.append({"role": "model", "content": full_res})
+                if model_name_pro:
+                    st.toast(f"🧠 切換至旗艦大腦：{model_name_pro}")
+                    model_pro = genai.GenerativeModel(model_name_pro, system_instruction="請根據審核表產出正式試卷與參考答案。")
+                    with st.chat_message("ai"):
+                        placeholder = st.empty()
+                        full_res = ""
+                        res = generate_with_retry(model_pro, f"{st.session_state.last_prompt_content}\n---\n參考審核表：\n{current_md}\n\n請正式出題。")
+                        for chunk in res:
+                            full_res += chunk.text
+                            placeholder.markdown(full_res + "▌")
+                        placeholder.markdown(full_res)
+                    st.session_state.chat_history.append({"role": "model", "content": full_res})
 
         if st.button("⬅️ 返回修改參數", use_container_width=True):
             st.session_state.phase = 1
             st.rerun()
     
-    # 顯示出題後的歷史與微調
     if len(st.session_state.chat_history) > 1:
         for msg in st.session_state.chat_history[1:]:
              with st.chat_message("ai"): st.markdown(msg["content"])
-        if prompt := st.chat_input("微調題目？"):
-            with st.chat_message("user"): st.markdown(prompt)
-            with st.spinner("🔧 修改中..."):
-                res = generate_with_retry(genai.GenerativeModel("gemini-1.5-pro").start_chat(history=[]), prompt)
-                st.session_state.chat_history.append({"role": "model", "content": res.text})
-                st.rerun()
 
 st.markdown('<div class="custom-footer">© 2026 新竹市香山區內湖國小. All Rights Reserved.</div>', unsafe_allow_html=True)
