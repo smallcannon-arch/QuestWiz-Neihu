@@ -8,7 +8,7 @@ from docx import Document
 import pandas as pd
 import subprocess
 import os
-import re # 新增：用於文字清洗
+import re
 
 # --- 1. 定義學科與題型映射 ---
 SUBJECT_Q_TYPES = {
@@ -47,7 +47,7 @@ def extract_text_from_files(files):
                 if os.path.exists("temp.doc"): os.remove("temp.doc")
             
             # --- 文字清洗區 ---
-            # 1. 移除連續多餘的空行，縮減 Token
+            # 移除連續多餘的空行
             file_text = re.sub(r'\n\s*\n', '\n\n', file_text)
             text_content += f"\n\n=== 檔案: {file.name} ===\n{file_text}"
             
@@ -56,8 +56,82 @@ def extract_text_from_files(files):
             
     return text_content
 
-# --- 3. 核心 Gem 命題鐵律 (Phase 1 專用：審核表生成) ---
-# 這裡稍微修改，教導 AI 如何「分配分數」
+# --- 3. Excel 下載工具 (抗沾黏 + 自動排版美化版) ---
+def md_to_excel(md_text):
+    try:
+        # Step 1: 預處理 - 修復 AI 可能的格式錯誤
+        cleaned_text = md_text.replace("||", "|\n|")
+        
+        lines = cleaned_text.strip().split('\n')
+        table_lines = []
+        is_table_started = False
+        
+        # Step 2: 錨點搜尋 - 只抓取真正的表格內容
+        for line in lines:
+            if ("單元" in line or "目標" in line or "配分" in line) and "|" in line:
+                is_table_started = True
+                table_lines.append(line)
+                continue
+            
+            if is_table_started:
+                if "---" in line: continue
+                if "|" in line:
+                    table_lines.append(line)
+                
+        if not table_lines: return None
+
+        # Step 3: 資料解析
+        data = []
+        for line in table_lines:
+            row = [cell.strip() for cell in line.strip('|').split('|')]
+            data.append(row)
+
+        if len(data) < 2: return None
+
+        headers = data[0]
+        rows = data[1:]
+        
+        # Step 4: 強力補齊與切削
+        max_cols = len(headers)
+        cleaned_rows = []
+        for r in rows:
+            if len(r) == max_cols:
+                cleaned_rows.append(r)
+            elif len(r) < max_cols:
+                cleaned_rows.append(r + [''] * (max_cols - len(r)))
+            else:
+                cleaned_rows.append(r[:max_cols])
+
+        df = pd.DataFrame(cleaned_rows, columns=headers)
+        
+        # Step 5: 使用 XlsxWriter 引擎進行美化
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            df.to_excel(writer, index=False, sheet_name='學習目標審核表')
+            workbook = writer.book
+            worksheet = writer.sheets['學習目標審核表']
+            
+            wrap_format = workbook.add_format({'text_wrap': True, 'valign': 'vcenter'})
+            header_format = workbook.add_format({
+                'bold': True, 'text_wrap': True, 'valign': 'vcenter', 
+                'fg_color': '#D7E4BC', 'border': 1
+            })
+
+            for col_num, value in enumerate(df.columns.values):
+                worksheet.write(0, col_num, value, header_format)
+
+            # 設定欄寬 A=15, B=55(目標), C=20, D=10
+            worksheet.set_column(0, 0, 15, wrap_format)
+            worksheet.set_column(1, 1, 55, wrap_format) 
+            worksheet.set_column(2, 2, 20, wrap_format)
+            worksheet.set_column(3, 3, 10, wrap_format)
+                
+        return output.getvalue()
+    except Exception as e:
+        print(f"Excel 轉換失敗: {e}")
+        return None
+
+# --- 4. 核心 Gem 命題鐵律 (Phase 1 專用) ---
 GEM_INSTRUCTIONS_PHASE1 = """
 你是「國小專業定期評量命題 AI」。
 
@@ -74,24 +148,21 @@ GEM_INSTRUCTIONS_PHASE1 = """
    - **每一列資料必須強制換行**，不可接在同一行。
 """
 
-# --- 4. 智能模型選擇與重試機制 ---
+# --- 5. 智能模型與工具 ---
 def get_best_model(api_key, mode="fast"):
     genai.configure(api_key=api_key)
     try:
         models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
         if not models: return None, "找不到可用模型"
         target_model = None
-        # 優先選擇 flash 模型以求快速與長文本處理能力
         if mode == "fast":
             for m in models:
                 if 'flash' in m.lower(): target_model = m; break
             if not target_model: target_model = models[0]
-        # 這裡保留 smart 邏輯給第二階段用
         elif mode == "smart":
             for m in models:
                 if 'pro' in m.lower() and '1.5' in m.lower(): target_model = m; break
             if not target_model: target_model = models[0]
-            
         return target_model, None
     except Exception as e: return None, str(e)
 
@@ -105,17 +176,14 @@ def generate_with_retry(model_or_chat, prompt, stream=True):
                 return model_or_chat.generate_content(prompt, stream=stream)
         except Exception as e:
             if "429" in str(e):
-                wait_time = (i + 1) * 3
-                st.toast(f"⏳ 伺服器忙碌，休息 {wait_time} 秒後再試...", icon="☕")
-                time.sleep(wait_time)
+                time.sleep((i + 1) * 3)
             else:
                 raise e
-    raise Exception("連線逾時，請檢查 API Key 或網路狀態。")
+    raise Exception("連線逾時")
 
-# --- 5. 網頁介面配置 ---
+# --- 6. 介面設定 ---
 st.set_page_config(page_title="內湖國小 AI 輔助出題系統", layout="wide")
 
-# (保留原本的 CSS 樣式)
 st.markdown("""
     <style>
     header[data-testid="stHeader"] { display: none !important; visibility: hidden !important; }
@@ -158,7 +226,6 @@ st.markdown("""
     </div>
     """, unsafe_allow_html=True)
 
-# 狀態管理
 if "phase" not in st.session_state: st.session_state.phase = 1 
 if "chat_history" not in st.session_state: st.session_state.chat_history = []
 if "last_prompt_content" not in st.session_state: st.session_state.last_prompt_content = ""
@@ -213,7 +280,6 @@ if st.session_state.phase == 1:
                 st.warning("⚠️ 動作中止：請確認年級、科目、題型與教材已備妥。")
             else:
                 with st.spinner("⚡ 正在極速掃描教材內容，請稍候..."):
-                    # 1. 準備 API
                     keys = [k.strip() for k in api_input.replace('\n', ',').split(',') if k.strip()]
                     target_key = random.choice(keys)
                     model_name, error_msg = get_best_model(target_key, mode="fast")
@@ -221,17 +287,14 @@ if st.session_state.phase == 1:
                     if error_msg:
                         st.error(f"❌ API 連線錯誤：{error_msg}")
                     else:
-                        # 2. 讀取並清洗檔案
                         content = extract_text_from_files(uploaded_files)
-                        
                         try:
                             st.toast(f"⚡ 啟動 AI 引擎 ({model_name}) 分析中...", icon="🤖")
                             
-                            # 3. 設定 Phase 1 專用模型
                             model_fast = genai.GenerativeModel(
                                 model_name=model_name,
                                 system_instruction=GEM_INSTRUCTIONS_PHASE1, 
-                                generation_config={"temperature": 0.0} # 溫度 0 確保格式最穩定
+                                generation_config={"temperature": 0.0}
                             )
                             
                             chat = model_fast.start_chat(history=[])
@@ -241,27 +304,17 @@ if st.session_state.phase == 1:
                                 full_response = ""
                                 t_str = "、".join(selected_types)
                                 
-                                # 4. 構建精準 Prompt
                                 prompt_content = f"""
                                 任務：分析以下教材並產出審核表。
-                                
-                                【參數設定】
-                                年級：{grade}
-                                科目：{subject}
-                                可用題型：{t_str}
-                                
-                                【教材內容】
-                                {content}
-                                
+                                【參數設定】年級：{grade}, 科目：{subject}, 可用題型：{t_str}
+                                【教材內容】{content}
                                 【執行步驟】
                                 1. 識別教材中的單元結構。
-                                2. 提取具體的學習目標（Key Learning Points）。
+                                2. 提取具體的學習目標。
                                 3. 根據內容長度，計算該單元應佔總分 100 分中的多少比例。
                                 4. 僅輸出 Markdown 表格。
                                 """
                                 st.session_state.last_prompt_content = prompt_content
-                                
-                                # 5. 串流輸出
                                 response = generate_with_retry(chat, prompt_content, stream=True)
                                 
                                 for chunk in response:
@@ -270,28 +323,55 @@ if st.session_state.phase == 1:
                                         message_placeholder.markdown(full_response + "▌")
                                 message_placeholder.markdown(full_response)
                             
-                            # 6. 狀態保存與換頁
-                            # 簡單防呆：確保有產出表格
                             if "|" in full_response and "單元" in full_response:
                                 st.session_state.chat_history.append({"role": "model", "content": full_response})
                                 st.session_state.phase = 2
-                                time.sleep(1) # 稍微緩衝讓使用者看清結果
+                                time.sleep(1)
                                 st.rerun()
                             else:
-                                st.error("❌ AI 產出格式異常，未偵測到表格，請檢查教材檔案是否清晰。")
+                                st.error("❌ AI 產出格式異常，未偵測到表格。")
                                 
                         except Exception as e: 
                             st.error(f"連線失敗：{e} (請檢查 API Key 或稍後重試)")
 
-# --- Phase 2: 這裡先留白或顯示簡單訊息，等待你下一步指令 ---
+# --- Phase 2: 下載與確認 ---
 elif st.session_state.phase == 2:
-    st.info("✅ 第一階段完成！審核表已生成 (Phase 2 待續...)")
     current_md = st.session_state.chat_history[0]["content"]
-    st.markdown(current_md)
     
-    if st.button("⬅️ 返回重來"):
-        st.session_state.phase = 1
-        st.session_state.chat_history = []
-        st.rerun()
+    with st.container(border=True):
+        st.markdown("### 📥 第二階段：下載審核表")
+        st.info("請下載 Excel 表格，確認配分與學習目標是否正確。確認無誤後請點擊下方按鈕進入出題階段。")
+        
+        with st.expander("👁️ 預覽 AI 產出的表格內容", expanded=False):
+            st.markdown(current_md)
+        
+        # Excel 轉換
+        excel_data = md_to_excel(current_md)
+        
+        c1, c2 = st.columns([1, 1])
+        with c1:
+            if excel_data:
+                st.download_button(
+                    label="📥 下載 Excel 審核表",
+                    data=excel_data,
+                    file_name=f"內湖國小_{st.session_state.get('subject', '科目')}_審核表.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True
+                )
+            else:
+                st.warning("⚠️ 表格轉換失敗")
+        
+        with c2:
+             if st.button("⬅️ 返回重來", use_container_width=True):
+                st.session_state.phase = 1
+                st.session_state.chat_history = []
+                st.rerun()
+
+    st.divider()
+    
+    if st.button("✅ 審核無誤，開始正式命題 (Phase 3)", type="primary", use_container_width=True):
+        st.toast("🚀 進入 Phase 3... (功能開發中)", icon="🚧")
+        # st.session_state.phase = 3
+        # st.rerun()
 
 st.markdown('<div class="custom-footer">© 2026 新竹市香山區內湖國小. All Rights Reserved.</div>', unsafe_allow_html=True)
