@@ -81,7 +81,7 @@ def extract_text_from_files(files):
             
     return text_content
 
-# --- 3. Excel 下載工具 (含：抗沾黏 + 分數自動校正 + 美化) ---
+# --- 3. Excel 下載工具 (含：數值清洗 + 分數自動校正 + 美化) ---
 def md_to_excel(md_text):
     try:
         # Step 1: 預處理 - 修復 AI 可能的格式錯誤
@@ -129,7 +129,7 @@ def md_to_excel(md_text):
 
         df = pd.DataFrame(cleaned_rows, columns=headers)
         
-        # --- 🔥 分數自動校正 (Normalization) ---
+        # --- 🔥 分數自動校正 (Normalization) 與 數值清洗 ---
         score_col = None
         for col in df.columns:
             if "配分" in col:
@@ -138,29 +138,37 @@ def md_to_excel(md_text):
         
         if score_col:
             try:
-                # 提取數字
-                scores = []
-                for x in df[score_col]:
-                    nums = re.findall(r'\d+', str(x))
-                    scores.append(float(nums[0]) if nums else 0.0)
+                # 定義清洗函式：把 "10分", "約5%" 變成 10.0
+                def clean_number(x):
+                    try:
+                        # 只保留數字和小數點
+                        nums = re.findall(r"[-+]?\d*\.\d+|\d+", str(x))
+                        return float(nums[0]) if nums else 0.0
+                    except:
+                        return 0.0
+
+                # 先將該欄位全部清洗為 float
+                df[score_col] = df[score_col].apply(clean_number)
                 
-                current_total = sum(scores)
+                current_total = df[score_col].sum()
                 
                 # 如果總分不是 100，且大於 0，進行校正
                 if current_total > 0 and current_total != 100:
                     st.toast(f"⚖️ 系統自動校正：將原始總分 {int(current_total)} 分依比例調整為 100 分。", icon="✅")
+                    # 依比例校正
+                    df[score_col] = (df[score_col] / current_total) * 100
+                
+                # 四捨五入並轉為「整數 (int)」
+                df[score_col] = df[score_col].round().astype(int)
+
+                # 處理四捨五入誤差，將差額補在分數最高的那項
+                diff = 100 - df[score_col].sum()
+                if diff != 0:
+                    max_idx = df[score_col].idxmax()
+                    df.loc[max_idx, score_col] += diff
                     
-                    new_scores = [(s / current_total) * 100 for s in scores]
-                    rounded_scores = [round(s) for s in new_scores]
-                    
-                    # 處理四捨五入誤差，將差額補在分數最高的那項
-                    diff = 100 - sum(rounded_scores)
-                    if diff != 0:
-                        max_idx = rounded_scores.index(max(rounded_scores))
-                        rounded_scores[max_idx] += diff
-                    
-                    df[score_col] = rounded_scores
-            except:
+            except Exception as e:
+                print(f"分數校正失敗: {e}")
                 pass # 若校正失敗則維持原樣
         # ------------------------------------
 
@@ -176,6 +184,8 @@ def md_to_excel(md_text):
                 'bold': True, 'text_wrap': True, 'valign': 'vcenter', 
                 'fg_color': '#D7E4BC', 'border': 1
             })
+            # 數字專用格式 (置中)
+            num_format = workbook.add_format({'valign': 'vcenter', 'align': 'center'})
 
             # 設定標題列格式
             for col_num, value in enumerate(df.columns.values):
@@ -185,7 +195,9 @@ def md_to_excel(md_text):
             worksheet.set_column(0, 0, 15, wrap_format) # 單元
             worksheet.set_column(1, 1, 55, wrap_format) # 學習目標 (最寬)
             worksheet.set_column(2, 2, 20, wrap_format) # 題型
-            worksheet.set_column(3, 3, 10, wrap_format) # 配分
+            
+            # 強制最後一欄(配分)使用數字格式，且寬度較窄
+            worksheet.set_column(3, 3, 10, num_format)
                 
         return output.getvalue()
     except Exception as e:
@@ -201,9 +213,10 @@ GEM_INSTRUCTIONS_PHASE1 = """
 
 ### 絕對規則 (違反將導致系統崩潰)：
 1. **配分邏輯**：請根據各單元內容的「篇幅長度」與「重要性」，將總分分配為 **剛好 100 分**。
-2. **禁止廢話**：**嚴禁** 撰寫前言 (如 "好的，這是我整理的...") 或結語。
-3. **禁止出題**：現在還不是出題階段，**嚴禁** 產出題目。
-4. **格式要求**：
+2. **數字格式**：「預計配分」欄位 **只能填寫阿拉伯數字** (例如：10)，**嚴禁** 加上「分」、「%」或其他文字。
+3. **禁止廢話**：**嚴禁** 撰寫前言 (如 "好的，這是我整理的...") 或結語。
+4. **禁止出題**：現在還不是出題階段，**嚴禁** 產出題目。
+5. **格式要求**：
    - 僅輸出標準 Markdown 表格。
    - 欄位必須包含：| 單元名稱 | 學習目標(原文) | 對應題型 | 預計配分 |
    - **每一列資料必須強制換行**，不可接在同一行。
