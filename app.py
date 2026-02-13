@@ -56,7 +56,7 @@ def md_to_excel(md_text):
         return output.getvalue()
     except: return None
 
-# --- 4. 核心 Gem 命題鐵律 (強化禁制令) ---
+# --- 4. 核心 Gem 命題鐵律 ---
 GEM_INSTRUCTIONS = """
 你是「國小專業定期評量命題 AI」。
 
@@ -69,7 +69,7 @@ GEM_INSTRUCTIONS = """
 3. **科目防呆**：若教材與科目不符，僅回覆『ERROR_SUBJECT_MISMATCH』。
 """
 
-# --- 5. 智能模型選擇與重試機制 (解決 429 Error) ---
+# --- 5. 智能模型選擇與重試機制 ---
 def get_best_model(api_key, mode="fast"):
     genai.configure(api_key=api_key)
     try:
@@ -79,7 +79,7 @@ def get_best_model(api_key, mode="fast"):
         if mode == "fast":
             for m in models:
                 if 'flash' in m.lower(): target_model = m; break
-            if not target_model: target_model = models[0] # Fallback
+            if not target_model: target_model = models[0]
         elif mode == "smart":
             for m in models:
                 if 'pro' in m.lower() and '1.5' in m.lower(): target_model = m; break
@@ -90,15 +90,19 @@ def get_best_model(api_key, mode="fast"):
         return target_model, None
     except Exception as e: return None, str(e)
 
-# 自動重試函數
-def generate_with_retry(model, prompt, stream=True):
+# 自動重試函數 (已修復 AttributeError)
+def generate_with_retry(model_or_chat, prompt, stream=True):
     max_retries = 3
     for i in range(max_retries):
         try:
-            return model.generate_content(prompt, stream=stream)
+            # 自動判斷是 ChatSession 還是 GenerativeModel
+            if hasattr(model_or_chat, 'send_message'):
+                return model_or_chat.send_message(prompt, stream=stream)
+            else:
+                return model_or_chat.generate_content(prompt, stream=stream)
         except Exception as e:
             if "429" in str(e): # 捕捉配額額滿錯誤
-                wait_time = (i + 1) * 3 # 第一次等3秒，第二次等6秒...
+                wait_time = (i + 1) * 5 # 延長等待時間：5秒, 10秒, 15秒
                 st.toast(f"⏳ 伺服器忙碌 (429)，{wait_time} 秒後自動重試 ({i+1}/{max_retries})...", icon="⚠️")
                 time.sleep(wait_time)
             else:
@@ -255,7 +259,7 @@ if st.session_state.phase == 1:
                                 """
                                 st.session_state.last_prompt_content = prompt_content
                                 
-                                # 使用重試機制呼叫 AI
+                                # 使用修復後的重試函數呼叫 AI
                                 response = generate_with_retry(chat, prompt_content, stream=True)
                                 
                                 for chunk in response:
@@ -318,7 +322,7 @@ elif st.session_state.phase == 2:
                                 
                                 請正式產出【試題】與【參考答案卷】。
                                 """
-                                # 使用重試機制
+                                # 使用修復後的重試函數
                                 response = generate_with_retry(model_smart, final_prompt, stream=True)
                                 for chunk in response:
                                     full_response += chunk.text
