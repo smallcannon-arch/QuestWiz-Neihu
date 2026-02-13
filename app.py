@@ -2,7 +2,7 @@ import streamlit as st
 import google.generativeai as genai
 import random
 import io
-import re
+import time
 from pypdf import PdfReader
 from docx import Document
 import pandas as pd
@@ -76,7 +76,6 @@ st.markdown("""
     .app-title { font-size: 16px; color: #94A3B8; margin-top: 8px; }
     h1, h2, h3, p, span, label, .stMarkdown { color: #E2E8F0 !important; }
     
-    /* 詳細版卡片樣式 */
     .step-box {
         background-color: #1E293B; padding: 12px; border-radius: 10px; 
         margin-bottom: 12px; border-left: 5px solid #3B82F6; font-size: 13px;
@@ -85,7 +84,6 @@ st.markdown("""
     .step-box a { color: #60A5FA !important; text-decoration: none; font-weight: bold; }
     .step-box a:hover { text-decoration: underline; }
     
-    /* 側邊欄按鈕強制置中 */
     [data-testid="stSidebar"] .stButton > button { display: block; margin: 0 auto !important; }
     
     .footer { position: fixed; left: 0; bottom: 0; width: 100%; background-color: #0F172A; color: #475569; text-align: center; padding: 15px; font-size: 11px; border-top: 1px solid #1E293B; z-index: 100; }
@@ -100,9 +98,9 @@ st.markdown("""
 # 狀態管理
 if "phase" not in st.session_state: st.session_state.phase = 1 
 if "chat_history" not in st.session_state: st.session_state.chat_history = []
-if "chat_session" not in st.session_state: st.session_state.chat_session = None
+if "last_prompt_content" not in st.session_state: st.session_state.last_prompt_content = "" # 用來傳遞 Phase 1 的內容給 Phase 2
 
-# --- Sidebar: 詳細引導 ---
+# --- Sidebar ---
 with st.sidebar:
     st.markdown("### 🖥️ 快速開始指南")
     st.markdown("""
@@ -125,10 +123,8 @@ with st.sidebar:
     """, unsafe_allow_html=True)
     
     api_input = st.text_area("在此輸入 API Key", height=70, placeholder="必填欄位")
-    
     st.divider()
     
-    # --- 資源區塊 (全數更新) ---
     st.markdown("### 📂 資源快速連結")
     st.markdown("""
     <div class="step-box">
@@ -148,12 +144,15 @@ with st.sidebar:
     if st.button("🔄 重置系統進度"):
         st.session_state.phase = 1
         st.session_state.chat_history = []
+        st.session_state.last_prompt_content = ""
         st.rerun()
 
-# --- Phase 1: 規劃審核表 ---
+# --- Phase 1: 快速模型 (Flash) 規劃審核表 ---
 if st.session_state.phase == 1:
     with st.container(border=True):
         st.markdown("### 📍 第一階段：參數設定與學習目標規劃")
+        st.caption("🚀 此階段將使用 **Gemini 1.5 Flash (極速版)** 快速掃描教材")
+        
         c1, c2, c3 = st.columns(3)
         with c1: grade = st.selectbox("1. 選擇年級", ["", "一年級", "二年級", "三年級", "四年級", "五年級", "六年級"], index=0)
         with c2: subject = st.selectbox("2. 選擇科目", ["", "國語", "數學", "自然科學", "社會", "英語"], index=0)
@@ -171,18 +170,15 @@ if st.session_state.phase == 1:
         st.divider()
         uploaded_files = st.file_uploader("5. 上傳教材檔案", type=["pdf", "docx", "doc"], accept_multiple_files=True)
         
-        # --- 🔴 嚴格防呆區：只有按下按鈕才會執行以下判斷 ---
         if st.button("🚀 產出學習目標審核表", type="primary", use_container_width=True):
-            # 1. 檢查 API
             if not api_input:
                 st.error("❌ 動作中止：尚未輸入 API Key。")
-            # 2. 檢查參數與檔案
             elif not grade or not subject or not uploaded_files or not selected_types:
                 st.warning("⚠️ 動作中止：請確認年級、科目、題型與教材已備妥。")
-            # 3. 若都通過，才開始執行
             else:
                 keys = [k.strip() for k in api_input.replace('\n', ',').split(',') if k.strip()]
                 genai.configure(api_key=random.choice(keys))
+                
                 content = ""
                 for f in uploaded_files:
                     ext = f.name.split('.')[-1].lower()
@@ -191,54 +187,16 @@ if st.session_state.phase == 1:
                     elif ext == 'doc': content += read_doc(f)
                 
                 try:
-                    available = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-                    target = "models/gemini-2.5-flash" if "models/gemini-2.5-flash" in available else available[0]
-                    model = genai.GenerativeModel(model_name=target, system_instruction=GEM_INSTRUCTIONS, generation_config={"temperature": 0.0})
-                    chat = model.start_chat(history=[])
-                    with st.spinner("⚡ 正在分析教材內容並原文提取學習目標..."):
+                    # Phase 1: 使用 Flash 模型 (速度優先)
+                    model_flash = genai.GenerativeModel(
+                        model_name="gemini-1.5-flash", # 指定 Flash
+                        system_instruction=GEM_INSTRUCTIONS, 
+                        generation_config={"temperature": 0.0}
+                    )
+                    
+                    st.toast("⚡ 啟動極速引擎 (Flash) 分析教材中...")
+                    
+                    with st.chat_message("ai"):
+                        message_placeholder = st.empty()
+                        full_response = ""
                         t_str = "、".join(selected_types)
-                        res = chat.send_message(f"年級：{grade}, 科目：{subject}\n題型：{t_str}\n教材：{content}")
-                        # 4. 檢查科目內容相符性
-                        if "ERROR_SUBJECT_MISMATCH" in res.text:
-                            st.error(f"❌ 防呆啟動：偵測到教材內容與『{subject}』不符，請重新確認檔案。")
-                        else:
-                            st.session_state.chat_session = chat
-                            st.session_state.chat_history.append({"role": "model", "content": res.text})
-                            st.session_state.phase = 2
-                            st.rerun()
-                except Exception as e: st.error(f"連線失敗：{e}")
-
-# --- Phase 2: 出題 ---
-elif st.session_state.phase == 2:
-    current_md = st.session_state.chat_history[0]["content"]
-    with st.chat_message("ai"):
-        st.markdown(current_md)
-        excel_data = md_to_excel(current_md)
-        if excel_data:
-            st.download_button(label="📥 匯出此學習目標審核表 (Excel 格式)", data=excel_data, file_name=f"內湖國小_{subject}_審核表.xlsx", use_container_width=True)
-
-    st.divider()
-    with st.container(border=True):
-        st.markdown("### 📝 第二階段：試卷正式生成")
-        cb1, cb2 = st.columns(2)
-        with cb1:
-            if st.button("✅ 審核表確認無誤，開始出題", type="primary", use_container_width=True):
-                with st.spinner("⚡ 命題中..."):
-                    res = st.session_state.chat_session.send_message("確認無誤，請依照此表產出【試題】與【參考答案卷】。")
-                    st.session_state.chat_history.append({"role": "model", "content": res.text})
-                    st.rerun()
-        with cb2:
-            if st.button("⬅️ 返回修改參數", use_container_width=True):
-                st.session_state.phase = 1
-                st.session_state.chat_history = []
-                st.rerun()
-
-    if len(st.session_state.chat_history) > 1:
-        for msg in st.session_state.chat_history[1:]:
-            with st.chat_message("ai"): st.markdown(msg["content"])
-        if prompt := st.chat_input("微調試題？"):
-            res = st.session_state.chat_session.send_message(prompt)
-            st.session_state.chat_history.append({"role": "model", "content": res.text})
-            st.rerun()
-
-st.markdown('<div class="footer">© 2026 新竹市香山區內湖國小. All Rights Reserved.</div>', unsafe_allow_html=True)
