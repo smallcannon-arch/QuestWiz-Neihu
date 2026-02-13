@@ -19,23 +19,30 @@ SUBJECT_Q_TYPES = {
     "": ["單選題", "是非題", "填充題", "簡答題"]
 }
 
-# --- 2. 檔案讀取工具 ---
-def read_pdf(file):
-    pdf_reader = PdfReader(file)
-    return "".join([p.extract_text() or "" for p in pdf_reader.pages])
-
-def read_docx(file):
-    doc = Document(file)
-    return "\n".join([p.text for p in doc.paragraphs])
-
-def read_doc(file):
-    with open("temp.doc", "wb") as f: f.write(file.getbuffer())
-    try:
-        result = subprocess.run(['antiword', 'temp.doc'], capture_output=True, text=True)
-        return result.stdout if result.returncode == 0 else "[讀取失敗]"
-    except: return "[組件未就緒]"
-    finally:
-        if os.path.exists("temp.doc"): os.remove("temp.doc")
+# --- 2. 檔案讀取工具 (加入快取優化 🚀) ---
+# 透過 @st.cache_data，讓程式記住讀過的檔案，不用每次都重讀
+@st.cache_data
+def extract_text_from_files(files):
+    text_content = ""
+    for file in files:
+        try:
+            ext = file.name.split('.')[-1].lower()
+            if ext == 'pdf':
+                pdf_reader = PdfReader(file)
+                text_content += "".join([p.extract_text() or "" for p in pdf_reader.pages])
+            elif ext == 'docx':
+                doc = Document(file)
+                text_content += "\n".join([p.text for p in doc.paragraphs])
+            elif ext == 'doc':
+                # .doc 處理較複雜，通常不快取或需特殊處理，這裡維持原樣
+                with open("temp.doc", "wb") as f: f.write(file.getbuffer())
+                result = subprocess.run(['antiword', 'temp.doc'], capture_output=True, text=True)
+                if result.returncode == 0:
+                    text_content += result.stdout
+                if os.path.exists("temp.doc"): os.remove("temp.doc")
+        except Exception as e:
+            text_content += f"\n[讀取錯誤: {file.name}]"
+    return text_content
 
 # --- 3. Excel 下載工具 ---
 def md_to_excel(md_text):
@@ -51,12 +58,12 @@ def md_to_excel(md_text):
         return output.getvalue()
     except: return None
 
-# --- 4. 核心 Gem 命題鐵律 ---
+# --- 4. 核心 Gem 命題鐵律 (優化指令：減少廢話) ---
 GEM_INSTRUCTIONS = """
 你是「國小專業定期評量命題 AI」。
 1. **科目守門員**：若教材與科目明顯不符，僅回覆：『ERROR_SUBJECT_MISMATCH』。
 2. **目標對應**：學習目標必須原文採自教材。每一條目標在整份試卷中至少出現一次。
-3. **分階段輸出**：Phase 1 審核表，Phase 2 試卷與答案。
+3. **直接輸出**：請直接產出表格或試題，不要有任何開場白（如「好的，這是...」）或結尾語，以節省生成時間。
 """
 
 # --- 5. 智能模型選擇器 ---
@@ -92,36 +99,42 @@ st.markdown("""
     
     .school-header {
         background: linear-gradient(90deg, #1E293B 0%, #334155 100%);
-        padding: 20px; border-radius: 15px; text-align: center; margin-bottom: 20px; 
+        padding: 25px; border-radius: 18px; text-align: center; margin-bottom: 25px; 
         border: 1px solid #475569;
     }
-    .school-name { font-size: 24px; font-weight: 700; color: #F1F5F9; letter-spacing: 3px; }
-    .app-title { font-size: 14px; color: #94A3B8; margin-top: 5px; }
+    .school-name { font-size: 26px; font-weight: 700; color: #F1F5F9; letter-spacing: 3px; }
+    .app-title { font-size: 15px; color: #94A3B8; margin-top: 6px; }
     h1, h2, h3, p, span, label, .stMarkdown { color: #E2E8F0 !important; }
     
-    /* 極致緊湊型卡片 (無捲軸優化) */
-    .compact-box {
-        background-color: #1E293B; padding: 10px; border-radius: 8px; 
-        margin-bottom: 8px; border-left: 4px solid #3B82F6; font-size: 13px;
-        color: #CBD5E1; line-height: 1.5;
+    /* 舒適型卡片 (間距拉寬優化) */
+    .comfort-box {
+        background-color: #1E293B; 
+        padding: 15px;               /* 增加內距 */
+        border-radius: 10px; 
+        margin-bottom: 15px;         /* 增加卡片間距 */
+        border-left: 5px solid #3B82F6; 
+        font-size: 14px;             /* 字體稍微加大 */
+        color: #CBD5E1; 
+        line-height: 1.8;            /* 行高增加，閱讀不擁擠 */
     }
-    .compact-box b { color: #fff; }
-    .compact-box a { color: #60A5FA !important; text-decoration: none; font-weight: bold; }
-    .compact-box a:hover { text-decoration: underline; }
-    .compact-box ul { margin: 0; padding-left: 1.2rem; }
-    .compact-box li { margin-bottom: 2px; }
+    .comfort-box b { color: #fff; }
+    .comfort-box a { color: #60A5FA !important; text-decoration: none; font-weight: bold; }
+    .comfort-box a:hover { text-decoration: underline; }
+    .comfort-box ul { margin: 0; padding-left: 1.2rem; }
+    .comfort-box li { margin-bottom: 5px; } /* 列表項目間距 */
 
-    /* 側邊欄元件緊湊化 */
-    [data-testid="stSidebar"] .stMarkdown { margin-bottom: -10px; } 
-    .stTextArea textarea { min-height: 60px; }
-    .stTextArea { margin-bottom: 5px !important; }
+    /* 側邊欄元件舒適化 */
+    [data-testid="stSidebar"] .stMarkdown { margin-bottom: 10px; } 
+    .stTextArea textarea { min-height: 80px; } /* 輸入框拉高 */
+    .stTextArea { margin-bottom: 15px !important; }
     [data-testid="stSidebar"] .stButton > button { 
-        display: block; margin: 5px auto !important; 
-        width: 100%; border-radius: 6px; height: 35px;
+        display: block; margin: 15px auto !important; /* 按鈕上下留白 */
+        width: 100%; border-radius: 8px; height: 42px; /* 按鈕加大 */
         background-color: #334155; border: 1px solid #475569;
+        font-size: 15px;
     }
     
-    .footer { position: fixed; left: 0; bottom: 0; width: 100%; background-color: #0F172A; color: #475569; text-align: center; padding: 10px; font-size: 10px; border-top: 1px solid #1E293B; z-index: 100; }
+    .footer { position: fixed; left: 0; bottom: 0; width: 100%; background-color: #0F172A; color: #475569; text-align: center; padding: 12px; font-size: 11px; border-top: 1px solid #1E293B; z-index: 100; }
     </style>
     
     <div class="school-header">
@@ -135,12 +148,12 @@ if "phase" not in st.session_state: st.session_state.phase = 1
 if "chat_history" not in st.session_state: st.session_state.chat_history = []
 if "last_prompt_content" not in st.session_state: st.session_state.last_prompt_content = ""
 
-# --- Sidebar: 極致緊湊版 (無捲軸) ---
+# --- Sidebar: 舒適版 (間距拉寬) ---
 with st.sidebar:
     st.markdown("### 🚀 快速指南")
-    # 將步驟合併為單一緊湊區塊 [cite: 2026-02-13]
+    
     st.markdown("""
-    <div class="compact-box">
+    <div class="comfort-box">
         <ol style="margin:0; padding-left:1.2rem;">
             <li>前往 <a href="https://aistudio.google.com/" target="_blank">Google AI Studio (點我)</a></li>
             <li>登入<b>個人 Google 帳號</b> (避開教育版)</li>
@@ -150,9 +163,8 @@ with st.sidebar:
     </div>
     """, unsafe_allow_html=True)
     
-    api_input = st.text_area("在此輸入 API Key", height=68, placeholder="請貼上金鑰...")
+    api_input = st.text_area("在此輸入 API Key", height=80, placeholder="請貼上金鑰...")
     
-    # 重置按鈕緊跟在輸入框下 [cite: 2026-02-13]
     if st.button("🔄 重置系統"):
         st.session_state.phase = 1
         st.session_state.chat_history = []
@@ -160,23 +172,22 @@ with st.sidebar:
         st.rerun()
 
     st.markdown("### 📚 資源連結")
-    # 資源連結合併為單一區塊 [cite: 2026-02-13]
     st.markdown("""
-    <div class="compact-box">
-        <b>教材下載：</b>
-        <a href="https://webetextbook.knsh.com.tw/" target="_blank">康軒</a> | 
-        <a href="https://edisc3.hle.com.tw/" target="_blank">翰林</a> | 
-        <a href="https://reader.nani.com.tw/" target="_blank">南一</a><br>
-        <b>參考資料：</b>
-        <a href="https://cirn.moe.edu.tw/Syllabus/index.aspx?sid=1108" target="_blank">108課綱(CIRN)</a> | 
-        <a href="https://www.nhps.hc.edu.tw/" target="_blank">校網</a>
+    <div class="comfort-box">
+        <b>教材下載：</b><br>
+        • <a href="https://webetextbook.knsh.com.tw/" target="_blank">康軒電子書</a><br>
+        • <a href="https://edisc3.hle.com.tw/" target="_blank">翰林行動大師</a><br>
+        • <a href="https://reader.nani.com.tw/" target="_blank">南一 OneBox</a><br>
+        <br>
+        <b>參考資料：</b><br>
+        • <a href="https://cirn.moe.edu.tw/Syllabus/index.aspx?sid=1108" target="_blank">108課綱資源網 (CIRN)</a><br>
+        • <a href="https://www.nhps.hc.edu.tw/" target="_blank">內湖國小校網</a>
     </div>
     """, unsafe_allow_html=True)
 
 # --- Phase 1: 參數設定與教材上傳 ---
 if st.session_state.phase == 1:
     with st.container(border=True):
-        # 標題更名 [cite: 2026-02-13]
         st.markdown("### 📍 第一階段：參數設定與教材上傳")
         
         c1, c2, c3 = st.columns(3)
@@ -210,12 +221,8 @@ if st.session_state.phase == 1:
                     if error_msg:
                         st.error(f"❌ API 連線錯誤：{error_msg}")
                     else:
-                        content = ""
-                        for f in uploaded_files:
-                            ext = f.name.split('.')[-1].lower()
-                            if ext == 'pdf': content += read_pdf(f)
-                            elif ext == 'docx': content += read_docx(f)
-                            elif ext == 'doc': content += read_doc(f)
+                        # 使用快取函數讀取檔案 (效能優化關鍵 🚀)
+                        content = extract_text_from_files(uploaded_files)
                         
                         try:
                             st.toast(f"⚡ 啟動 AI 引擎 ({model_name}) 分析中...", icon="🤖")
