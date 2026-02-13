@@ -20,7 +20,7 @@ SUBJECT_Q_TYPES = {
     "": ["單選題", "是非題", "填充題", "簡答題"]
 }
 
-# --- 2. 核心功能函式 (延續之前進度) ---
+# --- 2. 核心功能函式 ---
 @st.cache_data
 def extract_text_from_files(files):
     text_content = ""
@@ -65,7 +65,7 @@ def process_table_data(md_text):
         return pd.DataFrame(rows, columns=headers)
     except: return None
 
-# --- 3. 視覺與排版設計 (補回超連結與平均分散) ---
+# --- 3. 介面視覺設計 ---
 st.set_page_config(page_title="內湖國小 AI 輔助出題系統", layout="wide")
 
 st.markdown("""
@@ -75,24 +75,22 @@ st.markdown("""
     .block-container { max-width: 1200px; padding-top: 1.5rem !important; }
     
     .school-header { background: linear-gradient(90deg, #1E293B 0%, #334155 100%); padding: 25px; border-radius: 15px; text-align: center; margin-bottom: 25px; border: 1px solid #475569; }
-    .school-name { font-size: 24px; font-weight: 700; color: #F1F5F9; letter-spacing: 3px; }
-    .app-title { font-size: 14px; color: #94A3B8; }
+    .school-name { font-size: 26px; font-weight: 700; color: #F1F5F9; letter-spacing: 3px; }
+    .app-title { font-size: 15px; color: #94A3B8; }
 
-    /* 側邊欄平均分散排版 [cite: 2026-02-13] */
-    [data-testid="stSidebar"] > div:first-child {
-        display: flex;
-        flex-direction: column;
-        height: 95vh;
+    [data-testid="stSidebar"] > div:first-child { display: flex; flex-direction: column; height: 96vh; justify-content: space-between; }
+    .sb-section { padding: 10px 0; }
+    [data-testid="stSidebar"] h3 { font-size: 22px !important; margin-bottom: 15px !important; }
+
+    .comfort-box { 
+        background-color: #1E293B; padding: 20px; border-radius: 12px; border-left: 6px solid #3B82F6; 
+        font-size: 16px; color: #CBD5E1; line-height: 2.0; 
     }
-    .sb-section { flex-grow: 1; display: flex; flex-direction: column; justify-content: center; }
-
-    .comfort-box { background-color: #1E293B; padding: 15px; border-radius: 10px; border-left: 5px solid #3B82F6; font-size: 13px; color: #CBD5E1; line-height: 1.7; }
     .comfort-box b { color: #60A5FA; }
-    .comfort-box a { color: #F87171 !important; text-decoration: none; font-weight: bold; }
+    .comfort-box a { color: #60A5FA !important; text-decoration: underline; font-weight: bold; }
     
-    /* 防止文字遮擋與按鈕優化 */
-    .stTextArea textarea { font-size: 14px; }
-    [data-testid="stSidebar"] .stButton > button { width: 100%; height: 45px; border-radius: 8px; font-weight: bold; }
+    .stTextArea label { font-size: 18px !important; font-weight: bold; }
+    [data-testid="stSidebar"] .stButton > button { width: 100%; height: 50px; border-radius: 10px; font-size: 18px; font-weight: bold; }
     
     .custom-footer { position: fixed; left: 0; bottom: 0; width: 100%; background-color: #0F172A; color: #475569; text-align: center; padding: 10px; font-size: 11px; z-index: 100; }
     </style>
@@ -103,15 +101,15 @@ st.markdown("""
     </div>
     """, unsafe_allow_html=True)
 
-# 狀態
+# 狀態管理優化 [cite: 2026-02-13]
 if "phase" not in st.session_state: st.session_state.phase = 1 
 if "chat_history" not in st.session_state: st.session_state.chat_history = []
 if "last_prompt_content" not in st.session_state: st.session_state.last_prompt_content = ""
+if "subject" not in st.session_state: st.session_state.subject = ""
 
-# --- Sidebar: 平均分散排版與圖文連結補回 --- [cite: 2026-02-13]
+# --- Sidebar ---
 with st.sidebar:
-    # 第一區：圖文指南
-    st.markdown('<div class="sb-section">', unsafe_allow_html=True)
+    st.write('<div class="sb-section">', unsafe_allow_html=True)
     st.markdown("### 🚀 快速指南")
     st.markdown("""<div class="comfort-box">
         1️⃣ 前往 <a href="https://aistudio.google.com/" target="_blank">Google AI Studio (點我)</a><br>
@@ -119,19 +117,17 @@ with st.sidebar:
         3️⃣ 點擊 <b>"Get API key"</b> 並複製<br>
         4️⃣ 貼入下方欄位即可啟用系統
     </div>""", unsafe_allow_html=True)
-    st.markdown('</div>', unsafe_allow_html=True)
+    st.write('</div>', unsafe_allow_html=True)
 
-    # 第二區：API 輸入與重置
-    st.markdown('<div class="sb-section">', unsafe_allow_html=True)
+    st.write('<div class="sb-section">', unsafe_allow_html=True)
     st.markdown("### 🔑 金鑰設定")
-    api_input = st.text_area("在此貼上 API Key", height=80, placeholder="請貼上金鑰以開始...")
+    api_input = st.text_area("在此貼上 API Key", height=100, placeholder="請貼上金鑰以開始...")
     if st.button("🔄 重置系統進度"):
-        for k in ["phase", "chat_history", "last_prompt_content"]: st.session_state[k] = (1 if k=="phase" else [] if k=="chat_history" else "")
+        for k in ["phase", "chat_history", "last_prompt_content", "subject"]: st.session_state[k] = (1 if k=="phase" else [] if k=="chat_history" else "")
         st.rerun()
-    st.markdown('</div>', unsafe_allow_html=True)
+    st.write('</div>', unsafe_allow_html=True)
 
-    # 第三區：資源與校方連結
-    st.markdown('<div class="sb-section">', unsafe_allow_html=True)
+    st.write('<div class="sb-section">', unsafe_allow_html=True)
     st.markdown("### 📚 資源連結")
     st.markdown("""<div class="comfort-box">
         <b>📖 教材下載：</b><br>
@@ -140,7 +136,7 @@ with st.sidebar:
         • <a href="https://cirn.moe.edu.tw/Syllabus/index.aspx?sid=1108" target="_blank">108 課綱資源網</a><br>
         • <a href="https://www.nhps.hc.edu.tw/" target="_blank">內湖國小校網首頁</a>
     </div>""", unsafe_allow_html=True)
-    st.markdown('</div>', unsafe_allow_html=True)
+    st.write('</div>', unsafe_allow_html=True)
 
 # --- Phase 1: 參數設定與教材上傳 ---
 if st.session_state.phase == 1:
@@ -151,6 +147,9 @@ if st.session_state.phase == 1:
         with c2: subject = st.selectbox("2. 科目", ["", "國語", "數學", "自然科學", "社會", "英語"])
         with c3: mode = st.selectbox("3. 命題模式", ["🟢 模式 A：適中", "🔴 模式 B：困難", "🌟 模式 C：素養"])
         
+        # 儲存科目至 session_state [cite: 2026-02-13]
+        st.session_state.subject = subject
+
         st.markdown("**4. 勾選欲產出的題型**")
         available_types = SUBJECT_Q_TYPES.get(subject, SUBJECT_Q_TYPES[""])
         cols = st.columns(min(len(available_types), 4))
@@ -162,18 +161,15 @@ if st.session_state.phase == 1:
             if not api_input or not grade or not subject or not uploaded_files:
                 st.warning("⚠️ 提醒：請確認 API Key、年級、科目與教材檔案均已備妥。")
             else:
-                with st.spinner("⚡ 正在分析教材並提取學習目標..."):
-                    target_key = api_input.strip()
-                    model_name, error = find_available_model(target_key, "flash")
+                with st.spinner("⚡ 正在分析教材並提取原文學習目標..."):
+                    model_name, error = find_available_model(api_input.strip(), "flash")
                     if error: st.error(f"❌ 連線失敗：{error}")
                     else:
                         content = extract_text_from_files(uploaded_files)
                         try:
-                            model = genai.GenerativeModel(model_name, system_instruction="僅產出表格：| 單元名稱 | 學習目標(原文) | 對應題型 | 預計配分 |。嚴禁產出試題！")
-                            chat = model.start_chat(history=[])
-                            prompt = f"年級：{grade}, 科目：{subject}\n題型：{'、'.join(selected_types)}\n教材：{content}"
-                            st.session_state.last_prompt_content = prompt
-                            res = chat.send_message(prompt)
+                            model = genai.GenerativeModel(model_name, system_instruction="僅產出表格：| 單元名稱 | 學習目標(原文) | 對應題型 | 預計配分 |。嚴禁出題！")
+                            st.session_state.last_prompt_content = f"年級：{grade}, 科目：{subject}\n題型：{'、'.join(selected_types)}\n教材：{content}"
+                            res = model.generate_content(st.session_state.last_prompt_content)
                             st.session_state.chat_history.append({"role": "model", "content": res.text})
                             st.session_state.phase = 2
                             st.rerun()
@@ -187,21 +183,23 @@ elif st.session_state.phase == 2:
     df = process_table_data(current_md)
     if df is not None:
         c_d1, c_d2 = st.columns(2)
+        # 修正：使用 st.session_state.subject 以避免 NameError [cite: 2026-02-13]
+        subj_name = st.session_state.subject
         with c_d1:
             try:
                 buf = io.BytesIO()
-                with pd.ExcelWriter(buf, engine='xlsxwriter') as writer: df.to_excel(writer, index=False)
-                st.download_button("📥 下載 Excel 審核表", data=buf.getvalue(), file_name=f"內湖國小_{subject}_審核表.xlsx", use_container_width=True)
-            except: st.caption("優先使用 CSV 匯出 (Excel 相容)。")
+                with pd.ExcelWriter(buf, engine='openpyxl') as writer: df.to_excel(writer, index=False)
+                st.download_button("📥 下載 Excel 審核表", data=buf.getvalue(), file_name=f"內湖國小_{subj_name}_審核表.xlsx", use_container_width=True)
+            except: st.caption("優先使用 CSV 匯出。")
         with c_d2:
-            st.download_button("📥 下載 CSV 審核表 (保險用)", data=df.to_csv(index=False).encode('utf-8-sig'), file_name=f"內湖國小_{subject}_審核表.csv", use_container_width=True)
+            st.download_button("📥 下載 CSV 審核表 (保險用)", data=df.to_csv(index=False).encode('utf-8-sig'), file_name=f"內湖國小_{subj_name}_審核表.csv", use_container_width=True)
 
     st.divider()
     if st.button("✅ 確認無誤，開始出題", type="primary", use_container_width=True):
-        with st.spinner("🧠 正在使用深度命題大腦，請稍候..."):
+        with st.spinner("🧠 正切換至旗艦大腦 Pro 進行命題..."):
             model_name_pro, _ = find_available_model(api_input.strip(), "pro")
             model_pro = genai.GenerativeModel(model_name_pro)
-            res = model_pro.generate_content(f"{st.session_state.last_prompt_content}\n---\n參考審核表：\n{current_md}\n\n請正式產出試題。")
+            res = model_pro.generate_content(f"{st.session_state.last_prompt_content}\n---\n參考審核表：\n{current_md}\n\n請根據此學習目標產出正式試卷。")
             st.session_state.chat_history.append({"role": "model", "content": res.text})
             st.rerun()
     
