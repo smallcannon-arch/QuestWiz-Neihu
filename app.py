@@ -42,60 +42,55 @@ def extract_text_from_files(files):
             text_content += f"\n[讀取錯誤: {file.name}]"
     return text_content
 
-# --- 3. Excel 下載工具 (錨點定位暴力版) ---
+# --- 3. Excel 下載工具 (抗沾黏暴力版) --- [cite: 2026-02-13]
 def md_to_excel(md_text):
     try:
-        lines = md_text.strip().split('\n')
+        # 1. 預處理：解決 AI 忘記換行的問題 (|| 強制轉為換行)
+        # 有時候 AI 會輸出 "| 資料A || 資料B |"，這裡把它修復為 "| 資料A |\n| 資料B |"
+        cleaned_text = md_text.replace("||", "|\n|")
+        
+        lines = cleaned_text.strip().split('\n')
         table_lines = []
         is_table_started = False
         
-        # 1. 錨點搜尋：尋找含有 "單元名稱" 且含有 "|" 的行作為開頭
+        # 2. 錨點搜尋
         for line in lines:
-            if "單元名稱" in line and "|" in line:
+            # 寬鬆判定：只要有 "|" 且看起來像標題
+            if ("單元名稱" in line or "學習目標" in line) and "|" in line:
                 is_table_started = True
-                table_lines.append(line) # 加入標題行
+                table_lines.append(line)
                 continue
             
             if is_table_started:
-                # 如果遇到分隔線 (---)，跳過
                 if "---" in line: continue
-                # 如果這行有 "|"，視為資料行
                 if "|" in line:
                     table_lines.append(line)
-                # 如果連續出現空行或沒有 "|" 的文字，可能表格結束了，但為了保險起見，我們繼續抓
                 
         if not table_lines: return None
 
-        # 2. 解析資料
+        # 3. 解析資料
         data = []
         for line in table_lines:
-            # 切割並去除頭尾空白
             row = [cell.strip() for cell in line.split('|')]
-            
-            # 修正：如果因為頭尾有 | 導致切出空字串，將其移除
-            # 例如 "| A | B |" split 會變成 ['', 'A', 'B', '']
+            # 清理頭尾空字串
             if len(row) > 0 and row[0] == '': row.pop(0)
             if len(row) > 0 and row[-1] == '': row.pop()
-            
             data.append(row)
 
-        if len(data) < 2: return None # 只有標題沒內容
+        if len(data) < 2: return None
 
         headers = data[0]
         rows = data[1:]
         
-        # 3. 強力補齊與切削
+        # 4. 強力補齊與切削
         max_cols = len(headers)
         cleaned_rows = []
         for r in rows:
-            # 確保每一列長度跟標題一樣
             if len(r) == max_cols:
                 cleaned_rows.append(r)
             elif len(r) < max_cols:
-                # 少了就補空值
                 cleaned_rows.append(r + [''] * (max_cols - len(r)))
             else:
-                # 多了就切掉 (通常是註解)
                 cleaned_rows.append(r[:max_cols])
 
         df = pd.DataFrame(cleaned_rows, columns=headers)
@@ -103,28 +98,29 @@ def md_to_excel(md_text):
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
             df.to_excel(writer, index=False, sheet_name='學習目標審核表')
-            # 調整欄寬
             worksheet = writer.sheets['學習目標審核表']
             for i, col in enumerate(df.columns):
                 worksheet.set_column(i, i, 25)
                 
         return output.getvalue()
     except Exception as e:
-        print(f"Excel 建置失敗: {e}")
+        print(f"Excel 轉換失敗: {e}")
         return None
 
-# --- 4. 核心 Gem 命題鐵律 ---
+# --- 4. 核心 Gem 命題鐵律 (強化封口令) ---
 GEM_INSTRUCTIONS = """
 你是「國小專業定期評量命題 AI」。
 
-### ⚠️ Phase 1 嚴格指令：
-1. **任務**：僅產出【學習目標審核表】。
-2. **禁止**：嚴禁產出試題、題目、答案或任何前言後語。
-3. **格式**：必須使用標準 Markdown 表格。
-   - 第一行為標題：| 單元名稱 | 學習目標(原文) | 對應題型 | 預計配分 |
-   - 第二行為分隔：|---|---|---|---|
-   - 每一列資料必須獨立換行。
-4. **內容**：若教材與科目不符，僅回覆『ERROR_SUBJECT_MISMATCH』。
+### ⚠️ Phase 1 絕對規則 (違反將導致任務失敗)：
+1. **任務目標**：僅產出【學習目標審核表】。
+2. **禁止事項**：
+   - ❌ **嚴禁**產出任何試題 (如選擇題、是非題)。
+   - ❌ **嚴禁**產出答案或解析。
+   - ❌ **嚴禁**撰寫前言 (如 "好的，這是我整理的...") 或結語。
+3. **格式要求**：
+   - 必須是標準 Markdown 表格。
+   - 欄位：| 單元名稱 | 學習目標(原文) | 對應題型 | 預計配分 |
+   - **每一列資料必須強制換行**，不可接在同一行。
 """
 
 # --- 5. 智能模型選擇與重試機制 ---
@@ -310,6 +306,8 @@ if st.session_state.phase == 1:
                                 message_placeholder = st.empty()
                                 full_response = ""
                                 t_str = "、".join(selected_types)
+                                
+                                # 強制指令：不准出題，表格必須換行 [cite: 2026-02-13]
                                 prompt_content = f"""
                                 任務：Phase 1 學習目標提取
                                 年級：{grade}, 科目：{subject}
@@ -319,10 +317,11 @@ if st.session_state.phase == 1:
                                 ---
                                 請產出【學習目標審核表】。
                                 
-                                **格式嚴格要求：**
-                                1. 請直接輸出 Markdown 表格，不要包含 ```markdown 或 ``` 符號。
-                                2. 表格標題行必須包含：| 單元名稱 | 學習目標(原文) | 對應題型 | 預計配分 |
-                                3. 確保每一列資料都有 | 分隔，並換行。
+                                **⚠️ 嚴格格式要求：**
+                                1. 僅產出表格，**嚴禁**產出試題或題目。
+                                2. 請直接輸出 Markdown 表格，不要包含 ```markdown 符號。
+                                3. **每一列資料必須強制換行**，禁止使用 || 連接。
+                                4. 表格標題行：| 單元名稱 | 學習目標(原文) | 對應題型 | 預計配分 |
                                 """
                                 st.session_state.last_prompt_content = prompt_content
                                 
@@ -348,7 +347,6 @@ elif st.session_state.phase == 2:
     
     with st.container(border=True):
         st.markdown("### 📥 第二階段：下載審核表")
-        
         with st.chat_message("ai"): st.markdown(current_md)
         
         excel_data = md_to_excel(current_md)
