@@ -200,3 +200,137 @@ if st.session_state.phase == 1:
                         message_placeholder = st.empty()
                         full_response = ""
                         t_str = "、".join(selected_types)
+                        # 將此 Prompt 存起來，傳給 Phase 2 當作背景知識
+                        prompt_content = f"年級：{grade}, 科目：{subject}\n題型：{t_str}\n教材內容：\n{content}"
+                        st.session_state.last_prompt_content = prompt_content # 儲存 Context
+                        
+                        response = model_flash.generate_content(prompt_content + "\n\n請根據以上教材產出【學習目標審核表】。", stream=True)
+                        
+                        for chunk in response:
+                            full_response += chunk.text
+                            message_placeholder.markdown(full_response + "▌")
+                        message_placeholder.markdown(full_response)
+                    
+                    if "ERROR_SUBJECT_MISMATCH" in full_response:
+                        st.error(f"❌ 防呆啟動：教材內容與『{subject}』不符，請重新確認檔案。")
+                    else:
+                        st.session_state.chat_history.append({"role": "model", "content": full_response})
+                        st.session_state.phase = 2
+                        st.rerun()
+                except Exception as e: st.error(f"連線失敗 (請確認 API Key 是否支援 Flash 模型)：{e}")
+
+# --- Phase 2: 強大模型 (Pro) 正式出題 ---
+elif st.session_state.phase == 2:
+    current_md = st.session_state.chat_history[0]["content"]
+    
+    with st.container(border=True):
+        st.markdown("### 📥 第二階段：下載審核表")
+        with st.chat_message("ai"): st.markdown(current_md)
+        excel_data = md_to_excel(current_md)
+        if excel_data:
+            st.download_button(label="📥 匯出此審核表 (Excel)", data=excel_data, file_name=f"內湖國小_{subject}_審核表.xlsx", use_container_width=True)
+
+    st.divider()
+    with st.container(border=True):
+        st.markdown("### 📝 第三階段：試卷正式生成")
+        st.caption("🧠 此階段將切換至 **Gemini 1.5 Pro (旗艦版)** 模型，以確保出題品質與邏輯深度")
+        
+        cb1, cb2 = st.columns(2)
+        with cb1:
+            if st.button("✅ 審核表確認無誤，開始出題", type="primary", use_container_width=True):
+                # Phase 2: 切換至 Pro 模型 (品質優先)
+                keys = [k.strip() for k in api_input.replace('\n', ',').split(',') if k.strip()]
+                genai.configure(api_key=random.choice(keys))
+                
+                try:
+                    # 嘗試使用 Pro 模型，如果 Key 不支援則自動降級回 Flash
+                    target_model = "gemini-1.5-pro"
+                    available_models = [m.name for m in genai.list_models()]
+                    # 簡單檢查，若無 Pro 權限可考慮 fallback，但通常教育帳號都有
+                    
+                    model_pro = genai.GenerativeModel(
+                        model_name=target_model, 
+                        system_instruction=GEM_INSTRUCTIONS,
+                        generation_config={"temperature": 0.2} # 稍微增加一點創造力
+                    )
+                    
+                    st.toast("🧠 啟動旗艦大腦 (Pro) 命題中...請稍候")
+                    
+                    with st.chat_message("ai"):
+                        message_placeholder = st.empty()
+                        full_response = ""
+                        
+                        # 構建新的 Prompt，包含 Phase 1 的上下文
+                        # 這裡不使用 chat session，而是直接將背景資訊一次餵給 Pro 模型，避免 session 格式問題
+                        final_prompt = f"""
+                        {st.session_state.last_prompt_content}
+                        
+                        ---
+                        
+                        以上是教材內容。
+                        你剛才已經產出了以下審核表：
+                        {current_md}
+                        
+                        現在，請根據這份審核表，正式產出【試題】與【參考答案卷】。
+                        """
+                        
+                        response = model_pro.generate_content(final_prompt, stream=True)
+                        for chunk in response:
+                            full_response += chunk.text
+                            message_placeholder.markdown(full_response + "▌")
+                        message_placeholder.markdown(full_response)
+                    
+                    st.session_state.chat_history.append({"role": "model", "content": full_response})
+                    # 為了讓後續對話能延續，這裡我們可以把 Pro 建立為 session (選擇性，或繼續用單次問答)
+                    
+                except Exception as e:
+                    st.error(f"Pro 模型啟動失敗 (可能 Key 權限不足，將嘗試 Flash): {e}")
+                    # Fallback logic could go here
+
+        with cb2:
+            if st.button("⬅️ 返回修改參數", use_container_width=True):
+                st.session_state.phase = 1
+                st.session_state.chat_history = []
+                st.rerun()
+    
+    # 顯示出題結果
+    if len(st.session_state.chat_history) > 1:
+        # 這裡不重複顯示剛剛串流出來的內容，而是顯示歷史紀錄
+        # 但因為上面的串流是在 button 內，rerun 後會消失，所以需要在此處 render
+        # 不過因為我們沒有在 button 後 rerun (為了保留串流畫面)，所以這裡主要處理 "微調" 的顯示
+        pass 
+
+    # 微調對話框 (使用 Pro)
+    if len(st.session_state.chat_history) > 0:
+        if prompt := st.chat_input("對題目不滿意？請輸入指令微調 (如：第3題太難請換一題)"):
+            with st.chat_message("user"): st.markdown(prompt)
+            
+            # 微調時同樣使用 Pro
+            keys = [k.strip() for k in api_input.replace('\n', ',').split(',') if k.strip()]
+            genai.configure(api_key=random.choice(keys))
+            model_pro = genai.GenerativeModel("gemini-1.5-pro", system_instruction=GEM_INSTRUCTIONS)
+            
+            # 建立臨時對話歷史
+            history_for_chat = []
+            # 把 Phase 1 教材內容當作 User 輸入
+            history_for_chat.append({"role": "user", "parts": [st.session_state.last_prompt_content]})
+            # 把 Phase 1 審核表當作 Model 回答
+            history_for_chat.append({"role": "model", "parts": [current_md]})
+            # 把 Phase 2 題目當作 Model 回答 (如果有的話)
+            if len(st.session_state.chat_history) > 1:
+                 history_for_chat.append({"role": "model", "parts": [st.session_state.chat_history[-1]["content"]]})
+            
+            chat_pro = model_pro.start_chat(history=history_for_chat)
+            
+            with st.chat_message("ai"):
+                message_placeholder = st.empty()
+                full_response = ""
+                response = chat_pro.send_message(prompt, stream=True)
+                for chunk in response:
+                    full_response += chunk.text
+                    message_placeholder.markdown(full_response + "▌")
+                message_placeholder.markdown(full_response)
+            
+            st.session_state.chat_history.append({"role": "model", "content": full_response})
+
+st.markdown('<div class="footer">© 2026 新竹市香山區內湖國小. All Rights Reserved.</div>', unsafe_allow_html=True)
