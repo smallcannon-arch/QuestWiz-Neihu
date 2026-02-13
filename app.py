@@ -42,48 +42,70 @@ def extract_text_from_files(files):
             text_content += f"\n[讀取錯誤: {file.name}]"
     return text_content
 
-# --- 3. Excel 下載工具 ---
+# --- 3. Excel 下載工具 (強力容錯版) --- [cite: 2026-02-13]
 def md_to_excel(md_text):
     try:
-        # 過濾掉非表格行，只保留以 | 開頭的行
-        lines = [l for l in md_text.strip().split('\n') if l.strip().startswith('|')]
-        if len(lines) < 2: return None # 至少要有標題和分隔線
+        # 1. 抓取所有含有 | 的行，並過濾掉 Markdown 分隔線 (---|---)
+        lines = [
+            l.strip() 
+            for l in md_text.strip().split('\n') 
+            if '|' in l and '---' not in l and l.strip()
+        ]
         
-        # 移除 Markdown 分隔線 (例如 |---|---|)
-        data_lines = [l for l in lines if '---' not in l]
+        if len(lines) < 2: return None # 資料太少，無法構成表格
         
-        if len(data_lines) < 2: return None
+        # 2. 處理標題列 (第一行)
+        # 去頭去尾的 |，然後分割
+        headers = [h.strip() for h in lines[0].strip('|').split('|')]
         
-        headers = [c.strip() for c in data_lines[0].split('|') if c.strip()]
-        data = [[c.strip() for c in l.split('|') if c.strip()] for l in data_lines[1:]]
-        
-        # 確保資料欄位數與標題一致 (簡單防呆)
+        # 3. 處理數據列
+        data = []
+        for line in lines[1:]:
+            row = [cell.strip() for cell in line.strip('|').split('|')]
+            data.append(row)
+            
+        # 4. 強力補齊機制 (解決欄位對不齊的問題)
+        max_cols = len(headers)
         cleaned_data = []
         for row in data:
-            if len(row) == len(headers):
-                cleaned_data.append(row)
-            elif len(row) > len(headers):
-                cleaned_data.append(row[:len(headers)]) # 截斷多餘
+            # 如果這一行欄位太多，切掉多餘的
+            if len(row) > max_cols:
+                cleaned_data.append(row[:max_cols])
+            # 如果這一行欄位太少，補空值
+            elif len(row) < max_cols:
+                cleaned_data.append(row + [''] * (max_cols - len(row)))
             else:
-                cleaned_data.append(row + [''] * (len(headers) - len(row))) # 補空值
+                cleaned_data.append(row)
                 
+        # 5. 轉成 DataFrame
         df = pd.DataFrame(cleaned_data, columns=headers)
+        
+        # 6. 輸出 Excel
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
             df.to_excel(writer, index=False, sheet_name='學習目標審核表')
+            
+            # 自動調整欄寬 (簡單版)
+            worksheet = writer.sheets['學習目標審核表']
+            for i, col in enumerate(df.columns):
+                worksheet.set_column(i, i, 20) # 預設寬度 20
+                
         return output.getvalue()
-    except: return None
+    except Exception as e:
+        print(f"Excel 轉換失敗: {e}") # Debug 用
+        return None
 
-# --- 4. 核心 Gem 命題鐵律 (強化表格指令) ---
+# --- 4. 核心 Gem 命題鐵律 ---
 GEM_INSTRUCTIONS = """
 你是「國小專業定期評量命題 AI」。
 
 ### ⚠️ 最高指導原則：
 1. **Phase 1 (現在)**：
    - 僅產出【學習目標審核表】。
-   - **必須使用標準 Markdown 表格格式**，確保每一列資料都獨立換行。
-   - **絕對禁止**在此階段產出任何試題、題目或答案。
-   - 表格欄位依序為：| 單元名稱 | 學習目標(原文) | 對應題型 | 預計配分 |
+   - **必須使用標準 Markdown 表格格式**。
+   - 禁止使用程式碼區塊符號 (```)。
+   - **絕對禁止**在此階段產出任何試題。
+   - 表格欄位：| 單元名稱 | 學習目標(原文) | 對應題型 | 預計配分 |
 2. **Phase 2 (之後)**：才依照審核表產出試題。
 3. **科目防呆**：若教材與科目不符，僅回覆『ERROR_SUBJECT_MISMATCH』。
 """
@@ -271,7 +293,7 @@ if st.session_state.phase == 1:
                                 message_placeholder = st.empty()
                                 full_response = ""
                                 t_str = "、".join(selected_types)
-                                # 在 Prompt 中強制要求 Markdown 表格格式
+                                # Prompt 強制對齊 [cite: 2026-02-13]
                                 prompt_content = f"""
                                 任務：Phase 1 學習目標提取
                                 年級：{grade}, 科目：{subject}
@@ -280,11 +302,11 @@ if st.session_state.phase == 1:
                                 {content}
                                 ---
                                 請產出【學習目標審核表】。
-                                **請務必使用標準 Markdown 表格格式輸出，包含以下欄位：**
-                                | 單元名稱 | 學習目標(原文) | 對應題型 | 預計配分 |
-                                |---|---|---|---|
                                 
-                                注意：僅產出表格，嚴禁產出試題！不要有其他開場白或結尾文字。
+                                **格式嚴格要求：**
+                                1. 請直接輸出 Markdown 表格，不要包含 ```markdown 或 ``` 符號。
+                                2. 請不要寫任何開場白或結尾。
+                                3. 表格欄位必須包含：| 單元名稱 | 學習目標(原文) | 對應題型 | 預計配分 |
                                 """
                                 st.session_state.last_prompt_content = prompt_content
                                 
@@ -310,13 +332,17 @@ elif st.session_state.phase == 2:
     
     with st.container(border=True):
         st.markdown("### 📥 第二階段：下載審核表")
+        
+        # 顯示 AI 回覆 
         with st.chat_message("ai"): st.markdown(current_md)
+        
+        # 嘗試轉換 Excel
         excel_data = md_to_excel(current_md)
         if excel_data:
             st.download_button(label="📥 匯出此審核表 (Excel)", data=excel_data, file_name=f"內湖國小_{subject}_審核表.xlsx", use_container_width=True)
         else:
-            # 若表格解析失敗，給予提示
-            st.warning("⚠️ 偵測到表格格式可能不完整 (AI 輸出格式異常)，Excel 匯出功能暫時停用，但您仍可繼續出題。")
+            # 容錯提示
+            st.warning("⚠️ 偵測到 AI 輸出的表格格式可能不完整，但您仍可繼續進行出題。")
 
     st.divider()
     with st.container(border=True):
