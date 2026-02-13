@@ -59,22 +59,14 @@ GEM_INSTRUCTIONS = """
 3. 嚴禁在此階段產出試題內容。
 """
 
-# --- 5. 網頁介面視覺設計 (電腦橫向優化版) ---
+# --- 5. 網頁介面視覺設計 ---
 st.set_page_config(page_title="內湖國小 AI 輔助出題系統", layout="wide")
 
 st.markdown("""
     <style>
-    /* 全域背景 */
     .stApp { background-color: #0F172A; }
+    .block-container { max-width: 1200px; padding-top: 2rem; padding-bottom: 5rem; }
     
-    /* 調整主容器比例：寬螢幕時不宜過寬，保持閱讀舒適度 */
-    .block-container {
-        max-width: 1200px;
-        padding-top: 2rem;
-        padding-bottom: 5rem;
-    }
-
-    /* 專業標題列 */
     .school-header {
         background: linear-gradient(90deg, #1E293B 0%, #334155 100%);
         padding: 30px; border-radius: 20px; text-align: center; margin-bottom: 30px; 
@@ -83,17 +75,17 @@ st.markdown("""
     .school-name { font-size: 28px; font-weight: 700; color: #F1F5F9; letter-spacing: 3px; }
     .app-title { font-size: 16px; color: #94A3B8; margin-top: 8px; font-weight: 300; }
 
-    /* 文字顏色 */
     h1, h2, h3, p, span, label, .stMarkdown { color: #E2E8F0 !important; }
 
-    /* 側邊欄引導卡片 */
+    /* 側邊欄引導卡片與連結樣式 */
     .step-box {
         background-color: #1E293B; padding: 12px; border-radius: 10px; 
         margin-bottom: 12px; border-left: 5px solid #3B82F6; font-size: 14px;
         color: #CBD5E1;
     }
+    .step-box a { color: #60A5FA !important; text-decoration: none; font-weight: bold; }
+    .step-box a:hover { text-decoration: underline; }
 
-    /* 版權文字 */
     .footer {
         position: fixed; left: 0; bottom: 0; width: 100%;
         background-color: #0F172A; color: #475569;
@@ -113,19 +105,40 @@ if "phase" not in st.session_state: st.session_state.phase = 1
 if "chat_history" not in st.session_state: st.session_state.chat_history = []
 if "chat_session" not in st.session_state: st.session_state.chat_session = None
 
-# --- Sidebar: API 引導 (電腦版優化) ---
+# --- Sidebar: API 引導 (含超連結) ---
 with st.sidebar:
     st.markdown("### 🖥️ 快速開始指南")
-    steps = [
-        ("Step 1. 前往官網", "🔍 Google AI Studio"),
-        ("Step 2. 登入帳號", "👤 使用教育帳號"),
-        ("Step 3. 取得金鑰", "🆕 Get API key"),
-        ("Step 4. 貼上啟用", "📋 下方輸入框")
-    ]
-    for title, desc in steps:
-        st.markdown(f'<div class="step-box"><b>{title}</b><br>{desc}</div>', unsafe_allow_html=True)
+    
+    # 使用 HTML 注入帶有超連結的說明框
+    st.markdown("""
+    <div class="step-box">
+        <b>Step 1. 前往官網</b><br>
+        🔗 <a href="https://aistudio.google.com/" target="_blank">Google AI Studio</a>
+    </div>
+    <div class="step-box">
+        <b>Step 2. 登入帳號</b><br>
+        👤 請登入您的教育 Google 帳號
+    </div>
+    <div class="step-box">
+        <b>Step 3. 取得金鑰</b><br>
+        🆕 點擊 <b>"Get API key"</b> 並複製
+    </div>
+    <div class="step-box">
+        <b>Step 4. 啟用系統</b><br>
+        📋 貼到下方框內即可開始
+    </div>
+    """, unsafe_allow_html=True)
     
     api_input = st.text_area("在此輸入 API Key", height=80, placeholder="支援多組，以逗號分隔")
+    st.divider()
+    
+    # 額外參考資訊
+    st.markdown("### 📚 相關資源")
+    st.markdown("""
+    - 🏫 <a href="https://www.nhps.hc.edu.tw/" target="_blank">內湖國小校網</a>
+    - 📖 <a href="https://www.naer.edu.tw/PageSyllabus?nodeid=188" target="_blank">108 課綱領域綱要</a>
+    """, unsafe_allow_html=True)
+    
     st.divider()
     if st.button("🔄 重置系統進度"):
         st.session_state.phase = 1
@@ -144,7 +157,7 @@ if st.session_state.phase == 1:
         st.divider()
         st.markdown("**4. 勾選欲產出的題型**")
         available_types = SUBJECT_Q_TYPES.get(subject, SUBJECT_Q_TYPES[""])
-        cols = st.columns(min(len(available_types), 4)) # 動態橫向排列核取方塊
+        cols = st.columns(min(len(available_types), 4))
         selected_types = []
         for i, t in enumerate(available_types):
             if cols[i % len(cols)].checkbox(t, value=True):
@@ -155,7 +168,7 @@ if st.session_state.phase == 1:
         
         if st.button("🚀 產出試題審核表 (含比例配分)", type="primary", use_container_width=True):
             if not grade or not subject or not api_input or not uploaded_files or not selected_types:
-                st.error("⚠️ 欄位未完整：請確認年級、科目、題型均已設定。")
+                st.error("⚠️ 提醒：請先確認年級、科目、題型均已設定。")
             else:
                 keys = [k.strip() for k in api_input.replace('\n', ',').split(',') if k.strip()]
                 genai.configure(api_key=random.choice(keys))
@@ -172,14 +185,14 @@ if st.session_state.phase == 1:
                     target = "models/gemini-2.5-flash" if "models/gemini-2.5-flash" in available else available[0]
                     model = genai.GenerativeModel(model_name=target, system_instruction=GEM_INSTRUCTIONS, generation_config={"temperature": 0.0})
                     chat = model.start_chat(history=[])
-                    with st.spinner("⚡ 分析中...正在計算教材節數權重"):
+                    with st.spinner("⚡ 分析中..."):
                         t_str = "、".join(selected_types)
-                        res = chat.send_message(f"年級：{grade}, 科目：{subject}, 模式：{mode}\n勾選題型：{t_str}\n教材：{content}\n--- 請產出審核表表格。")
+                        res = chat.send_message(f"年級：{grade}, 科目：{subject}, 模式：{mode}\n選用題型：{t_str}\n教材：{content}")
                         st.session_state.chat_session = chat
                         st.session_state.chat_history.append({"role": "model", "content": res.text})
                         st.session_state.phase = 2
                         st.rerun()
-                except Exception as e: st.error(f"API 連線異常：{e}")
+                except Exception as e: st.error(f"連線異常：{e}")
 
 # --- Phase 2: 確認與出題 ---
 elif st.session_state.phase == 2:
@@ -196,12 +209,12 @@ elif st.session_state.phase == 2:
         cb1, cb2 = st.columns(2)
         with cb1:
             if st.button("✅ 審核表確認，產出試卷與答案", type="primary", use_container_width=True):
-                with st.spinner("⚡ 命題中...請耐心等候完整產出"):
-                    res = st.session_state.chat_session.send_message("確認無誤，請依照此表產出【正式試題】與【參考答案卷】。")
+                with st.spinner("⚡ 命題中..."):
+                    res = st.session_state.chat_session.send_message("確認無誤，請依照此表產出【試題】與【參考答案卷】。")
                     st.session_state.chat_history.append({"role": "model", "content": res.text})
                     st.rerun()
         with cb2:
-            if st.button("⬅️ 返回修改目標", use_container_width=True):
+            if st.button("⬅️ 返回修改參數", use_container_width=True):
                 st.session_state.phase = 1
                 st.session_state.chat_history = []
                 st.rerun()
@@ -209,7 +222,7 @@ elif st.session_state.phase == 2:
     if len(st.session_state.chat_history) > 1:
         for msg in st.session_state.chat_history[1:]:
             with st.chat_message("ai"): st.markdown(msg["content"])
-        if prompt := st.chat_input("微調試題細節？"):
+        if prompt := st.chat_input("微調試題？"):
             res = st.session_state.chat_session.send_message(prompt)
             st.session_state.chat_history.append({"role": "model", "content": res.text})
             st.rerun()
