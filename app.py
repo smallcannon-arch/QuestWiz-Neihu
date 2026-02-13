@@ -128,7 +128,7 @@ with st.sidebar:
     
     st.divider()
     
-    # --- 資源區塊 (修正連結) ---
+    # --- 資源區塊 (全數更新) ---
     st.markdown("### 📂 資源快速連結")
     st.markdown("""
     <div class="step-box">
@@ -171,12 +171,15 @@ if st.session_state.phase == 1:
         st.divider()
         uploaded_files = st.file_uploader("5. 上傳教材檔案", type=["pdf", "docx", "doc"], accept_multiple_files=True)
         
-        # 按鈕觸發後的防呆邏輯
+        # --- 🔴 嚴格防呆區：只有按下按鈕才會執行以下判斷 ---
         if st.button("🚀 產出學習目標審核表", type="primary", use_container_width=True):
+            # 1. 檢查 API
             if not api_input:
                 st.error("❌ 動作中止：尚未輸入 API Key。")
+            # 2. 檢查參數與檔案
             elif not grade or not subject or not uploaded_files or not selected_types:
                 st.warning("⚠️ 動作中止：請確認年級、科目、題型與教材已備妥。")
+            # 3. 若都通過，才開始執行
             else:
                 keys = [k.strip() for k in api_input.replace('\n', ',').split(',') if k.strip()]
                 genai.configure(api_key=random.choice(keys))
@@ -195,8 +198,9 @@ if st.session_state.phase == 1:
                     with st.spinner("⚡ 正在分析教材內容並原文提取學習目標..."):
                         t_str = "、".join(selected_types)
                         res = chat.send_message(f"年級：{grade}, 科目：{subject}\n題型：{t_str}\n教材：{content}")
+                        # 4. 檢查科目內容相符性
                         if "ERROR_SUBJECT_MISMATCH" in res.text:
-                            st.error(f"❌ 防呆啟動：教材與『{subject}』不符，請重新確認。") [cite: 2026-02-13]
+                            st.error(f"❌ 防呆啟動：偵測到教材內容與『{subject}』不符，請重新確認檔案。")
                         else:
                             st.session_state.chat_session = chat
                             st.session_state.chat_history.append({"role": "model", "content": res.text})
