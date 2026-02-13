@@ -62,25 +62,24 @@ def extract_text_from_files(files):
             text_content += f"\n[讀取錯誤] {str(e)}\n"
     return text_content
 
-# --- 3. 邏輯修復：防呆算分系統 ---
+# --- 3. 邏輯修復：超級防呆算分系統 ---
 def calculate_scores(df):
-    # 初始化欄位，防止計算失敗時導致後續 KeyError
+    # 【關鍵修復 1】預先建立空欄位，確保就算計算失敗，Excel 下載也不會崩潰
     if '目標分配節數' not in df.columns: df['目標分配節數'] = 0.0
     if '預計配分' not in df.columns: df['預計配分'] = 0.0
 
     try:
-        # 1. 統一欄位名稱 (防呆)
+        # 統一欄位名稱
         if '授課節數' in df.columns:
             df.rename(columns={'授課節數': '單元總節數'}, inplace=True)
         
-        # 2. 強制轉數值 (關鍵修復！)
-        # 無論 AI 寫了什麼文字 (如 "未提供...")，一律強制轉為數字，轉不過的變成 NaN，再補成 1
+        # 【關鍵修復 2】強制轉數值 (Force Numeric)
+        # 只要 AI 寫的不是數字 (例如 "未提供")，全部變成 NaN，然後填補為 1
         df['單元總節數'] = pd.to_numeric(df['單元總節數'], errors='coerce').fillna(1)
         
-        # 3. 計算每個單元的目標數量
+        # 開始計算邏輯
         unit_counts = df['單元名稱'].value_counts()
         
-        # 4. 分配節數
         def distribute_hours(row):
             unit_name = row['單元名稱']
             total_unit_hours = row['單元總節數']
@@ -89,7 +88,6 @@ def calculate_scores(df):
 
         df['目標分配節數'] = df.apply(distribute_hours, axis=1)
 
-        # 5. 計算總時數與配分
         unit_hours_map = df[['單元名稱', '單元總節數']].drop_duplicates()
         total_course_hours = unit_hours_map['單元總節數'].sum()
         if total_course_hours == 0: total_course_hours = 1
@@ -97,16 +95,15 @@ def calculate_scores(df):
         df['原始配分'] = (df['目標分配節數'] / total_course_hours) * 100
         df['預計配分'] = df['原始配分'].apply(lambda x: round(x, 1))
 
-        # 6. 微調總分至 100
+        # 微調總分至 100
         current_sum = df['預計配分'].sum()
         diff = 100 - current_sum
-        if abs(diff) > 0.01: # 只有誤差大於 0.01 才修正
+        if abs(diff) > 0.01:
             df.iloc[-1, df.columns.get_loc('預計配分')] += diff
 
         return df
     except Exception as e:
-        # 如果真的發生錯誤，印出錯誤但不讓程式崩潰
-        st.error(f"⚠️ 配分計算發生例外狀況 (已自動略過): {e}")
+        st.error(f"⚠️ 配分計算發生部分錯誤 (已自動修復): {e}")
         return df
 
 # --- 4. Excel 下載 (修復 KeyError) ---
@@ -115,10 +112,9 @@ def df_to_excel(df):
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         export_df = df.copy()
         
-        # 定義期望的欄位順序
+        # 【關鍵修復 3】只匯出「真的存在」的欄位
         desired_cols = ['單元名稱', '單元總節數', '學習目標', '目標分配節數', '預計配分']
-        
-        # 關鍵修復：只選擇存在的欄位，避免 KeyError
+        # 過濾掉不存在的欄位，防止 KeyError
         final_cols = [c for c in desired_cols if c in export_df.columns]
         export_df = export_df[final_cols]
         
@@ -166,7 +162,7 @@ GEM_EXTRACT_PROMPT = """
    - **嚴禁合併**。
 3. **授課節數 (數字)**：
    - 該欄位**必須填入純數字** (例如 5, 4, 2)。
-   - 如果教材沒寫節數，**請直接填入 "1"**，不要寫文字說明 (如 "未提供...")。
+   - 如果教材沒寫節數，**請直接填入 "1"**，絕對不要寫文字說明 (如 "未提供...")。
    - 該單元的每一列都填入相同的總節數。
 
 教材內容：
@@ -215,7 +211,7 @@ if st.session_state.step == 1:
                     
                     if data:
                         df = pd.DataFrame(data[1:], columns=["單元名稱", "學習目標", "授課節數"])
-                        # 欄位重新命名 (與 calculate_scores 對齊)
+                        # 欄位重新命名
                         df.rename(columns={"授課節數": "單元總節數"}, inplace=True)
                         
                         df_cal = calculate_scores(df)
