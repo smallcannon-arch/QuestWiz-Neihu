@@ -225,7 +225,7 @@ if not st.session_state.chat_history:
         # 初始化模型
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel(
-            model_name="gemini-1.5-flash", 
+            model_name="gemini-1.5-pro", 
             system_instruction=SYSTEM_PROMPT
         )
         chat = model.start_chat(history=[])
@@ -272,3 +272,4 @@ else:
         st.session_state.chat_history = []
         st.session_state.chat_session = None
         st.rerun()
+
