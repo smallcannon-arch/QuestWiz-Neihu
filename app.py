@@ -90,32 +90,48 @@ def get_best_model(api_key, mode="fast"):
         return target_model, None
     except Exception as e: return None, str(e)
 
-# 自動重試函數 (已修復 AttributeError)
 def generate_with_retry(model_or_chat, prompt, stream=True):
     max_retries = 3
     for i in range(max_retries):
         try:
-            # 自動判斷是 ChatSession 還是 GenerativeModel
             if hasattr(model_or_chat, 'send_message'):
                 return model_or_chat.send_message(prompt, stream=stream)
             else:
                 return model_or_chat.generate_content(prompt, stream=stream)
         except Exception as e:
-            if "429" in str(e): # 捕捉配額額滿錯誤
-                wait_time = (i + 1) * 5 # 延長等待時間：5秒, 10秒, 15秒
+            if "429" in str(e):
+                wait_time = (i + 1) * 5
                 st.toast(f"⏳ 伺服器忙碌 (429)，{wait_time} 秒後自動重試 ({i+1}/{max_retries})...", icon="⚠️")
                 time.sleep(wait_time)
             else:
-                raise e # 其他錯誤直接拋出
-    raise Exception("重試次數過多，請稍後再試或檢查 API 配額。")
+                raise e
+    raise Exception("重試次數過多，請稍後再試。")
 
 # --- 6. 網頁介面視覺設計 ---
 st.set_page_config(page_title="內湖國小 AI 輔助出題系統", layout="wide")
 
 st.markdown("""
     <style>
+    /* 隱藏 Streamlit 預設 Header (關鍵修正) */
+    header[data-testid="stHeader"] {
+        display: none !important;
+        visibility: hidden !important;
+    }
+    /* 隱藏 Streamlit 預設 Footer */
+    footer {
+        display: none !important;
+        visibility: hidden !important;
+    }
+
+    /* 全域背景 */
     .stApp { background-color: #0F172A; }
-    .block-container { max-width: 1200px; padding-top: 1rem; padding-bottom: 5rem; }
+    
+    /* 調整主區塊上邊距，因為 Header 隱藏了，內容可以往上貼 */
+    .block-container { 
+        max-width: 1200px; 
+        padding-top: 1.5rem !important; 
+        padding-bottom: 5rem; 
+    }
     
     .school-header {
         background: linear-gradient(90deg, #1E293B 0%, #334155 100%);
@@ -132,9 +148,11 @@ st.markdown("""
         margin-bottom: 15px; border-left: 5px solid #3B82F6; 
         font-size: 14px; color: #CBD5E1; line-height: 1.8;
     }
+    .comfort-box b { color: #fff; }
     .comfort-box a { color: #60A5FA !important; text-decoration: none; font-weight: bold; }
+    .comfort-box a:hover { text-decoration: underline; }
     
-    /* 側邊欄元件 */
+    /* 側邊欄元件舒適化 */
     [data-testid="stSidebar"] .stMarkdown { margin-bottom: 10px; } 
     .stTextArea textarea { min-height: 80px; }
     .stTextArea { margin-bottom: 15px !important; }
@@ -144,7 +162,13 @@ st.markdown("""
         background-color: #334155; border: 1px solid #475569; font-size: 15px;
     }
     
-    .footer { position: fixed; left: 0; bottom: 0; width: 100%; background-color: #0F172A; color: #475569; text-align: center; padding: 12px; font-size: 11px; border-top: 1px solid #1E293B; z-index: 100; }
+    /* 自訂 Footer */
+    .custom-footer { 
+        position: fixed; left: 0; bottom: 0; width: 100%; 
+        background-color: #0F172A; color: #475569; 
+        text-align: center; padding: 12px; font-size: 11px; 
+        border-top: 1px solid #1E293B; z-index: 100; 
+    }
     </style>
     
     <div class="school-header">
@@ -230,7 +254,7 @@ if st.session_state.phase == 1:
                     if error_msg:
                         st.error(f"❌ API 連線錯誤：{error_msg}")
                     else:
-                        content = extract_text_from_files(uploaded_files) # 使用快取讀取
+                        content = extract_text_from_files(uploaded_files) # 快取讀取
                         
                         try:
                             st.toast(f"⚡ 啟動 AI 引擎 ({model_name}) 分析中...", icon="🤖")
@@ -259,7 +283,6 @@ if st.session_state.phase == 1:
                                 """
                                 st.session_state.last_prompt_content = prompt_content
                                 
-                                # 使用修復後的重試函數呼叫 AI
                                 response = generate_with_retry(chat, prompt_content, stream=True)
                                 
                                 for chunk in response:
@@ -274,7 +297,7 @@ if st.session_state.phase == 1:
                                 st.session_state.phase = 2
                                 st.rerun()
                         except Exception as e: 
-                            st.error(f"連線失敗：{e} (請檢查 API Key 配額或稍後重試)")
+                            st.error(f"連線失敗：{e} (請檢查 API Key 或稍後重試)")
 
 # --- Phase 2: 正式出題 ---
 elif st.session_state.phase == 2:
@@ -322,7 +345,6 @@ elif st.session_state.phase == 2:
                                 
                                 請正式產出【試題】與【參考答案卷】。
                                 """
-                                # 使用修復後的重試函數
                                 response = generate_with_retry(model_smart, final_prompt, stream=True)
                                 for chunk in response:
                                     full_response += chunk.text
@@ -338,11 +360,10 @@ elif st.session_state.phase == 2:
                 st.session_state.chat_history = []
                 st.rerun()
     
-    # 微調對話框
+    # 微調
     if len(st.session_state.chat_history) > 1:
         if prompt := st.chat_input("對題目不滿意？請輸入指令微調"):
             with st.chat_message("user"): st.markdown(prompt)
-            
             with st.spinner("🔧 AI 正在修改試題..."):
                 keys = [k.strip() for k in api_input.replace('\n', ',').split(',') if k.strip()]
                 genai.configure(api_key=random.choice(keys))
@@ -367,4 +388,4 @@ elif st.session_state.phase == 2:
                 
                 st.session_state.chat_history.append({"role": "model", "content": full_response})
 
-st.markdown('<div class="footer">© 2026 新竹市香山區內湖國小. All Rights Reserved.</div>', unsafe_allow_html=True)
+st.markdown('<div class="custom-footer">© 2026 新竹市香山區內湖國小. All Rights Reserved.</div>', unsafe_allow_html=True)
