@@ -20,7 +20,7 @@ SUBJECT_Q_TYPES = {
 }
 
 # --- 2. 檔案讀取工具 (快取優化) ---
-@st.cache_data
+@st.cache_data(show_spinner=False) # 隱藏預設 spinner，改用我們自訂的
 def extract_text_from_files(files):
     text_content = ""
     for file in files:
@@ -112,26 +112,10 @@ st.set_page_config(page_title="內湖國小 AI 輔助出題系統", layout="wide
 
 st.markdown("""
     <style>
-    /* 隱藏 Streamlit 預設 Header (關鍵修正) */
-    header[data-testid="stHeader"] {
-        display: none !important;
-        visibility: hidden !important;
-    }
-    /* 隱藏 Streamlit 預設 Footer */
-    footer {
-        display: none !important;
-        visibility: hidden !important;
-    }
-
-    /* 全域背景 */
+    header[data-testid="stHeader"] { display: none !important; visibility: hidden !important; }
+    footer { display: none !important; visibility: hidden !important; }
     .stApp { background-color: #0F172A; }
-    
-    /* 調整主區塊上邊距，因為 Header 隱藏了，內容可以往上貼 */
-    .block-container { 
-        max-width: 1200px; 
-        padding-top: 1.5rem !important; 
-        padding-bottom: 5rem; 
-    }
+    .block-container { max-width: 1200px; padding-top: 1.5rem !important; padding-bottom: 5rem; }
     
     .school-header {
         background: linear-gradient(90deg, #1E293B 0%, #334155 100%);
@@ -142,7 +126,6 @@ st.markdown("""
     .app-title { font-size: 15px; color: #94A3B8; margin-top: 6px; }
     h1, h2, h3, p, span, label, .stMarkdown { color: #E2E8F0 !important; }
     
-    /* 舒適型卡片 */
     .comfort-box {
         background-color: #1E293B; padding: 15px; border-radius: 10px; 
         margin-bottom: 15px; border-left: 5px solid #3B82F6; 
@@ -152,7 +135,6 @@ st.markdown("""
     .comfort-box a { color: #60A5FA !important; text-decoration: none; font-weight: bold; }
     .comfort-box a:hover { text-decoration: underline; }
     
-    /* 側邊欄元件舒適化 */
     [data-testid="stSidebar"] .stMarkdown { margin-bottom: 10px; } 
     .stTextArea textarea { min-height: 80px; }
     .stTextArea { margin-bottom: 15px !important; }
@@ -162,7 +144,6 @@ st.markdown("""
         background-color: #334155; border: 1px solid #475569; font-size: 15px;
     }
     
-    /* 自訂 Footer */
     .custom-footer { 
         position: fixed; left: 0; bottom: 0; width: 100%; 
         background-color: #0F172A; color: #475569; 
@@ -246,58 +227,74 @@ if st.session_state.phase == 1:
             elif not grade or not subject or not uploaded_files or not selected_types:
                 st.warning("⚠️ 動作中止：請確認年級、科目、題型與教材已備妥。")
             else:
-                with st.spinner("⚡ 正在極速掃描教材內容，請稍候..."):
+                # 建立一個進度容器，用來顯示分階段狀態
+                status_container = st.status("🚀 系統啟動中...", expanded=True)
+                
+                try:
                     keys = [k.strip() for k in api_input.replace('\n', ',').split(',') if k.strip()]
                     target_key = random.choice(keys)
+                    
+                    # 步驟 1: 偵測模型
+                    status_container.write("🔍 正在偵測最佳 AI 模型...")
                     model_name, error_msg = get_best_model(target_key, mode="fast")
                     
                     if error_msg:
-                        st.error(f"❌ API 連線錯誤：{error_msg}")
+                        status_container.update(label="❌ API 錯誤", state="error")
+                        st.error(f"API 連線錯誤：{error_msg}")
                     else:
-                        content = extract_text_from_files(uploaded_files) # 快取讀取
+                        status_container.write(f"✅ 已連線至高速模型：{model_name}")
                         
-                        try:
-                            st.toast(f"⚡ 啟動 AI 引擎 ({model_name}) 分析中...", icon="🤖")
+                        # 步驟 2: 讀取檔案
+                        status_container.write("📂 正在讀取並解析教材檔案 (如果檔案較大請稍候)...")
+                        content = extract_text_from_files(uploaded_files)
+                        
+                        # 步驟 3: 呼叫 AI
+                        status_container.write("⚡ 正在傳送資料至 AI 大腦並分析學習目標...")
+                        
+                        model_fast = genai.GenerativeModel(
+                            model_name=model_name,
+                            system_instruction=GEM_INSTRUCTIONS, 
+                            generation_config={"temperature": 0.0}
+                        )
+                        
+                        chat = model_fast.start_chat(history=[])
+                        
+                        with st.chat_message("ai"):
+                            message_placeholder = st.empty()
+                            full_response = ""
+                            t_str = "、".join(selected_types)
+                            prompt_content = f"""
+                            任務：Phase 1 學習目標提取
+                            年級：{grade}, 科目：{subject}
+                            題型：{t_str}
+                            教材內容：
+                            {content}
+                            ---
+                            請產出【學習目標審核表】。
+                            注意：僅產出表格，嚴禁產出試題！
+                            """
+                            st.session_state.last_prompt_content = prompt_content
                             
-                            model_fast = genai.GenerativeModel(
-                                model_name=model_name,
-                                system_instruction=GEM_INSTRUCTIONS, 
-                                generation_config={"temperature": 0.0}
-                            )
+                            # 完成準備，收起狀態欄，開始串流
+                            status_container.update(label="✅ 分析完成，正在生成表格...", state="complete", expanded=False)
                             
-                            chat = model_fast.start_chat(history=[])
+                            response = generate_with_retry(chat, prompt_content, stream=True)
                             
-                            with st.chat_message("ai"):
-                                message_placeholder = st.empty()
-                                full_response = ""
-                                t_str = "、".join(selected_types)
-                                prompt_content = f"""
-                                任務：Phase 1 學習目標提取
-                                年級：{grade}, 科目：{subject}
-                                題型：{t_str}
-                                教材內容：
-                                {content}
-                                ---
-                                請產出【學習目標審核表】。
-                                注意：僅產出表格，嚴禁產出試題！
-                                """
-                                st.session_state.last_prompt_content = prompt_content
-                                
-                                response = generate_with_retry(chat, prompt_content, stream=True)
-                                
-                                for chunk in response:
-                                    full_response += chunk.text
-                                    message_placeholder.markdown(full_response + "▌")
-                                message_placeholder.markdown(full_response)
+                            for chunk in response:
+                                full_response += chunk.text
+                                message_placeholder.markdown(full_response + "▌")
+                            message_placeholder.markdown(full_response)
+                        
+                        if "ERROR_SUBJECT_MISMATCH" in full_response:
+                            st.error(f"❌ 防呆啟動：教材內容與『{subject}』不符，請重新確認檔案。")
+                        else:
+                            st.session_state.chat_history.append({"role": "model", "content": full_response})
+                            st.session_state.phase = 2
+                            st.rerun()
                             
-                            if "ERROR_SUBJECT_MISMATCH" in full_response:
-                                st.error(f"❌ 防呆啟動：教材內容與『{subject}』不符，請重新確認檔案。")
-                            else:
-                                st.session_state.chat_history.append({"role": "model", "content": full_response})
-                                st.session_state.phase = 2
-                                st.rerun()
-                        except Exception as e: 
-                            st.error(f"連線失敗：{e} (請檢查 API Key 或稍後重試)")
+                except Exception as e: 
+                    status_container.update(label="❌ 發生錯誤", state="error")
+                    st.error(f"執行失敗：{e}")
 
 # --- Phase 2: 正式出題 ---
 elif st.session_state.phase == 2:
@@ -317,42 +314,52 @@ elif st.session_state.phase == 2:
         cb1, cb2 = st.columns(2)
         with cb1:
             if st.button("✅ 審核表確認無誤，開始出題", type="primary", use_container_width=True):
-                with st.spinner("🧠 正在進行深度推理命題，請稍候..."):
-                    keys = [k.strip() for k in api_input.replace('\n', ',').split(',') if k.strip()]
-                    target_key = random.choice(keys)
-                    model_name, error_msg = get_best_model(target_key, mode="smart")
-                    
-                    if error_msg:
-                         st.error(f"❌ 無法啟動高階模型：{error_msg}")
-                    else:
-                        st.toast(f"🧠 切換至深度思考模式 ({model_name})...", icon="💡")
+                # 使用 status container 顯示進度
+                status_container = st.status("🧠 深度思考中...", expanded=True)
+                status_container.write("🔍 切換至高階推理模型...")
+                
+                keys = [k.strip() for k in api_input.replace('\n', ',').split(',') if k.strip()]
+                target_key = random.choice(keys)
+                model_name, error_msg = get_best_model(target_key, mode="smart")
+                
+                if error_msg:
+                     status_container.update(label="❌ 模型啟動失敗", state="error")
+                     st.error(f"無法啟動高階模型：{error_msg}")
+                else:
+                    try:
+                        status_container.write(f"✅ 已啟動旗艦大腦：{model_name}")
+                        status_container.write("📝 正在根據審核表撰寫試題與詳解...")
                         
-                        try:
-                            model_smart = genai.GenerativeModel(
-                                model_name=model_name,
-                                system_instruction=GEM_INSTRUCTIONS,
-                                generation_config={"temperature": 0.2}
-                            )
+                        model_smart = genai.GenerativeModel(
+                            model_name=model_name,
+                            system_instruction=GEM_INSTRUCTIONS,
+                            generation_config={"temperature": 0.2}
+                        )
+                        
+                        # 準備完成，開始生成
+                        status_container.update(label="✅ 思考完成，開始作答...", state="complete", expanded=False)
+                        
+                        with st.chat_message("ai"):
+                            message_placeholder = st.empty()
+                            full_response = ""
+                            final_prompt = f"""
+                            {st.session_state.last_prompt_content}
+                            ---
+                            審核表參考：
+                            {current_md}
                             
-                            with st.chat_message("ai"):
-                                message_placeholder = st.empty()
-                                full_response = ""
-                                final_prompt = f"""
-                                {st.session_state.last_prompt_content}
-                                ---
-                                審核表參考：
-                                {current_md}
-                                
-                                請正式產出【試題】與【參考答案卷】。
-                                """
-                                response = generate_with_retry(model_smart, final_prompt, stream=True)
-                                for chunk in response:
-                                    full_response += chunk.text
-                                    message_placeholder.markdown(full_response + "▌")
-                                message_placeholder.markdown(full_response)
-                            
-                            st.session_state.chat_history.append({"role": "model", "content": full_response})
-                        except Exception as e: st.error(f"命題失敗：{e}")
+                            請正式產出【試題】與【參考答案卷】。
+                            """
+                            response = generate_with_retry(model_smart, final_prompt, stream=True)
+                            for chunk in response:
+                                full_response += chunk.text
+                                message_placeholder.markdown(full_response + "▌")
+                            message_placeholder.markdown(full_response)
+                        
+                        st.session_state.chat_history.append({"role": "model", "content": full_response})
+                    except Exception as e: 
+                        status_container.update(label="❌ 命題失敗", state="error")
+                        st.error(f"錯誤：{e}")
 
         with cb2:
             if st.button("⬅️ 返回修改參數", use_container_width=True):
