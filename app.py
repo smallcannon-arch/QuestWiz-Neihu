@@ -3,8 +3,7 @@ import sys
 import os
 import re
 
-# --- 0. 自動安裝依賴套件 (Auto-Install) ---
-# 這段程式碼會自動檢查並安裝缺少的套件，防止執行失敗
+# --- 0. 自動安裝依賴套件 ---
 def install_package(package):
     try:
         __import__(package)
@@ -12,7 +11,6 @@ def install_package(package):
         print(f"📦 正在自動安裝 {package}...")
         subprocess.check_call([sys.executable, "-m", "pip", "install", package])
 
-# 檢查清單
 install_package("xlsxwriter")
 install_package("pypdf")
 install_package("docx")
@@ -41,7 +39,7 @@ SUBJECT_Q_TYPES = {
     "": ["單選題", "是非題", "填充題", "簡答題"]
 }
 
-# --- 2. 檔案讀取工具 (強化版：分頁+清洗) ---
+# --- 2. 檔案讀取工具 ---
 @st.cache_data
 def extract_text_from_files(files):
     text_content = ""
@@ -49,63 +47,51 @@ def extract_text_from_files(files):
         try:
             file_text = ""
             ext = file.name.split('.')[-1].lower()
-            
             if ext == 'pdf':
                 pdf_reader = PdfReader(file)
-                # 加上頁碼標記，幫助 AI 區分單元邊界
                 for i, page in enumerate(pdf_reader.pages):
                     content = page.extract_text() or ""
                     file_text += f"\n--- Page {i+1} ---\n{content}"
             elif ext == 'docx':
                 doc = Document(file)
-                # 保留段落結構
                 file_text = "\n".join([p.text for p in doc.paragraphs])
             elif ext == 'doc':
-                # 嘗試處理舊版 Word，若失敗則忽略
                 try:
                     with open("temp.doc", "wb") as f: f.write(file.getbuffer())
                     result = subprocess.run(['antiword', 'temp.doc'], capture_output=True, text=True)
-                    if result.returncode == 0:
-                        file_text = result.stdout
+                    if result.returncode == 0: file_text = result.stdout
                     if os.path.exists("temp.doc"): os.remove("temp.doc")
-                except:
-                    file_text = "[舊版 .doc 讀取失敗，請轉存為 .docx]"
+                except: file_text = "[舊版 .doc 讀取失敗，請轉存為 .docx]"
             
-            # --- 文字清洗區 ---
-            # 移除連續多餘的空行，節省 Token
             file_text = re.sub(r'\n\s*\n', '\n\n', file_text)
             text_content += f"\n\n=== 檔案: {file.name} ===\n{file_text}"
-            
         except Exception as e:
             text_content += f"\n[讀取錯誤: {file.name} - {str(e)}]"
-            
     return text_content
 
-# --- 3. Excel 下載工具 (含：數值清洗 + 分數自動校正 + 美化) ---
-def md_to_excel(md_text):
+# --- 3. 資料處理工具 (拆分為：解析 Markdown -> DF -> Excel) ---
+
+def parse_md_to_df(md_text):
+    """將 Markdown 表格解析為 Pandas DataFrame，並進行清洗與配分校正"""
     try:
-        # Step 1: 預處理 - 修復 AI 可能的格式錯誤
+        # 1. 基礎清洗
         cleaned_text = md_text.replace("||", "|\n|")
-        
         lines = cleaned_text.strip().split('\n')
         table_lines = []
         is_table_started = False
         
-        # Step 2: 抓取表格內容
         for line in lines:
             if ("單元" in line or "目標" in line or "配分" in line) and "|" in line:
                 is_table_started = True
                 table_lines.append(line)
                 continue
-            
             if is_table_started:
                 if "---" in line: continue
-                if "|" in line:
-                    table_lines.append(line)
-                
+                if "|" in line: table_lines.append(line)
+        
         if not table_lines: return None
 
-        # Step 3: 資料解析
+        # 2. 轉為 List
         data = []
         for line in table_lines:
             row = [cell.strip() for cell in line.strip('|').split('|')]
@@ -116,63 +102,57 @@ def md_to_excel(md_text):
         headers = data[0]
         rows = data[1:]
         
-        # Step 4: 強力補齊與切削
+        # 3. 補齊欄位
         max_cols = len(headers)
         cleaned_rows = []
         for r in rows:
-            if len(r) == max_cols:
-                cleaned_rows.append(r)
-            elif len(r) < max_cols:
-                cleaned_rows.append(r + [''] * (max_cols - len(r)))
-            else:
-                cleaned_rows.append(r[:max_cols])
+            if len(r) == max_cols: cleaned_rows.append(r)
+            elif len(r) < max_cols: cleaned_rows.append(r + [''] * (max_cols - len(r)))
+            else: cleaned_rows.append(r[:max_cols])
 
         df = pd.DataFrame(cleaned_rows, columns=headers)
         
-        # --- 🔥 分數自動校正 (Normalization) 與 數值清洗 ---
-        score_col = None
-        for col in df.columns:
-            if "配分" in col:
-                score_col = col
-                break
-        
+        # --- 🔥 清洗題型 (只留第一個) ---
+        type_col = next((col for col in df.columns if "題型" in col), None)
+        if type_col:
+            def clean_type(x):
+                txt = str(x).replace(" ", "")
+                if "、" in txt: return txt.split("、")[0]
+                if "," in txt: return txt.split(",")[0]
+                return txt
+            df[type_col] = df[type_col].apply(clean_type)
+
+        # --- 🔥 配分自動校正 ---
+        score_col = next((col for col in df.columns if "配分" in col), None)
         if score_col:
             try:
-                # 定義清洗函式：把 "10分", "約5%" 變成 10.0
                 def clean_number(x):
-                    try:
-                        # 只保留數字和小數點
-                        nums = re.findall(r"[-+]?\d*\.\d+|\d+", str(x))
-                        return float(nums[0]) if nums else 0.0
-                    except:
-                        return 0.0
+                    nums = re.findall(r"[-+]?\d*\.\d+|\d+", str(x))
+                    return float(nums[0]) if nums else 0.0
 
-                # 先將該欄位全部清洗為 float
                 df[score_col] = df[score_col].apply(clean_number)
-                
                 current_total = df[score_col].sum()
                 
-                # 如果總分不是 100，且大於 0，進行校正
                 if current_total > 0 and current_total != 100:
-                    st.toast(f"⚖️ 系統自動校正：將原始總分 {int(current_total)} 分依比例調整為 100 分。", icon="✅")
-                    # 依比例校正
                     df[score_col] = (df[score_col] / current_total) * 100
                 
-                # 四捨五入並轉為「整數 (int)」
                 df[score_col] = df[score_col].round().astype(int)
-
-                # 處理四捨五入誤差，將差額補在分數最高的那項
+                
+                # 餘數分配
                 diff = 100 - df[score_col].sum()
                 if diff != 0:
                     max_idx = df[score_col].idxmax()
                     df.loc[max_idx, score_col] += diff
-                    
-            except Exception as e:
-                print(f"分數校正失敗: {e}")
-                pass # 若校正失敗則維持原樣
-        # ------------------------------------
+            except: pass
+            
+        return df
+    except Exception as e:
+        print(f"解析失敗: {e}")
+        return None
 
-        # Step 5: 使用 XlsxWriter 引擎進行美化
+def df_to_excel(df):
+    """將 DataFrame 轉為美化的 Excel bytes"""
+    try:
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
             df.to_excel(writer, index=False, sheet_name='學習目標審核表')
@@ -184,45 +164,38 @@ def md_to_excel(md_text):
                 'bold': True, 'text_wrap': True, 'valign': 'vcenter', 
                 'fg_color': '#D7E4BC', 'border': 1
             })
-            # 數字專用格式 (置中)
             num_format = workbook.add_format({'valign': 'vcenter', 'align': 'center'})
 
-            # 設定標題列格式
             for col_num, value in enumerate(df.columns.values):
                 worksheet.write(0, col_num, value, header_format)
 
-            # 設定欄寬
-            worksheet.set_column(0, 0, 15, wrap_format) # 單元
-            worksheet.set_column(1, 1, 55, wrap_format) # 學習目標 (最寬)
-            worksheet.set_column(2, 2, 20, wrap_format) # 題型
-            
-            # 強制最後一欄(配分)使用數字格式，且寬度較窄
+            worksheet.set_column(0, 0, 15, wrap_format)
+            worksheet.set_column(1, 1, 55, wrap_format) 
+            worksheet.set_column(2, 2, 20, wrap_format)
             worksheet.set_column(3, 3, 10, num_format)
                 
         return output.getvalue()
     except Exception as e:
-        print(f"Excel 轉換失敗: {e}")
         return None
 
-# --- 4. 核心 Gem 命題鐵律 (Phase 1 專用) ---
+# --- 4. 核心 Gem 命題鐵律 ---
 GEM_INSTRUCTIONS_PHASE1 = """
 你是「國小專業定期評量命題 AI」。
 
 ### ⚠️ Phase 1 任務目標：
 請閱讀使用者提供的教材內容，整理出一份【學習目標審核表】。
 
-### 絕對規則 (違反將導致系統崩潰)：
+### 絕對規則：
 1. **配分邏輯**：請根據各單元內容的「篇幅長度」與「重要性」，將總分分配為 **剛好 100 分**。
-2. **數字格式**：「預計配分」欄位 **只能填寫阿拉伯數字** (例如：10)，**嚴禁** 加上「分」、「%」或其他文字。
-3. **禁止廢話**：**嚴禁** 撰寫前言 (如 "好的，這是我整理的...") 或結語。
-4. **禁止出題**：現在還不是出題階段，**嚴禁** 產出題目。
-5. **格式要求**：
+2. **單一題型**：「對應題型」欄位 **只能選擇「一種」最適合的題型** (例如：單選題)。
+3. **數字格式**：「預計配分」欄位 **只能填寫阿拉伯數字** (例如：10)。
+4. **格式要求**：
    - 僅輸出標準 Markdown 表格。
-   - 欄位必須包含：| 單元名稱 | 學習目標(原文) | 對應題型 | 預計配分 |
-   - **每一列資料必須強制換行**，不可接在同一行。
+   - 欄位：| 單元名稱 | 學習目標(原文) | 對應題型 | 預計配分 |
+   - **每一列資料必須強制換行**。
 """
 
-# --- 5. 智能模型與工具 ---
+# --- 5. 智能模型設定 ---
 def get_best_model(api_key, mode="fast"):
     genai.configure(api_key=api_key)
     try:
@@ -249,11 +222,9 @@ def generate_with_retry(model_or_chat, prompt, stream=True):
             else:
                 return model_or_chat.generate_content(prompt, stream=stream)
         except Exception as e:
-            if "429" in str(e):
-                time.sleep((i + 1) * 3)
-            else:
-                raise e
-    raise Exception("連線逾時，請檢查 API Key 或網路狀態。")
+            if "429" in str(e): time.sleep((i + 1) * 3)
+            else: raise e
+    raise Exception("連線逾時")
 
 # --- 6. 介面設定 ---
 st.set_page_config(page_title="內湖國小 AI 輔助出題系統", layout="wide")
@@ -263,7 +234,6 @@ st.markdown("""
     header[data-testid="stHeader"] { display: none !important; visibility: hidden !important; }
     footer { display: none !important; visibility: hidden !important; }
     .stApp { background-color: #0F172A; }
-    .block-container { max-width: 1200px; padding-top: 1.5rem !important; padding-bottom: 5rem; }
     .school-header {
         background: linear-gradient(90deg, #1E293B 0%, #334155 100%);
         padding: 25px; border-radius: 18px; text-align: center; margin-bottom: 25px; 
@@ -303,16 +273,17 @@ st.markdown("""
 if "phase" not in st.session_state: st.session_state.phase = 1 
 if "chat_history" not in st.session_state: st.session_state.chat_history = []
 if "last_prompt_content" not in st.session_state: st.session_state.last_prompt_content = ""
+if "df_preview" not in st.session_state: st.session_state.df_preview = None
 
 # --- Sidebar ---
 with st.sidebar:
     st.markdown("### 🚀 系統設定")
     api_input = st.text_area("在此輸入 API Key", height=80, placeholder="請貼上 Google AI Studio 金鑰...")
-    
     if st.button("🔄 重置系統"):
         st.session_state.phase = 1
         st.session_state.chat_history = []
         st.session_state.last_prompt_content = ""
+        st.session_state.df_preview = None
         st.rerun()
 
     st.markdown("### 📚 資源連結")
@@ -341,113 +312,124 @@ if st.session_state.phase == 1:
         cols = st.columns(min(len(available_types), 4))
         selected_types = []
         for i, t in enumerate(available_types):
-            if cols[i % len(cols)].checkbox(t, value=True):
-                selected_types.append(t)
+            if cols[i % len(cols)].checkbox(t, value=True): selected_types.append(t)
         
         st.divider()
         uploaded_files = st.file_uploader("5. 上傳教材檔案 (Word/PDF)", type=["pdf", "docx", "doc"], accept_multiple_files=True)
         
         if st.button("🚀 產出學習目標審核表", type="primary", use_container_width=True):
-            if not api_input:
-                st.error("❌ 動作中止：側邊欄尚未輸入 API Key。")
+            if not api_input: st.error("❌ 請輸入 API Key")
             elif not grade or not subject or not uploaded_files or not selected_types:
-                st.warning("⚠️ 動作中止：請確認年級、科目、題型與教材已備妥。")
+                st.warning("⚠️ 請確認所有欄位已填寫")
             else:
-                with st.spinner("⚡ 正在極速掃描教材內容，請稍候..."):
+                with st.spinner("⚡ AI 正在分析教材..."):
                     keys = [k.strip() for k in api_input.replace('\n', ',').split(',') if k.strip()]
                     target_key = random.choice(keys)
                     model_name, error_msg = get_best_model(target_key, mode="fast")
                     
-                    if error_msg:
-                        st.error(f"❌ API 連線錯誤：{error_msg}")
+                    if error_msg: st.error(f"❌ API 錯誤：{error_msg}")
                     else:
                         content = extract_text_from_files(uploaded_files)
                         try:
-                            st.toast(f"⚡ 啟動 AI 引擎 ({model_name}) 分析中...", icon="🤖")
-                            
+                            st.toast(f"⚡ 啟動 AI 引擎 ({model_name})...", icon="🤖")
                             model_fast = genai.GenerativeModel(
                                 model_name=model_name,
                                 system_instruction=GEM_INSTRUCTIONS_PHASE1, 
                                 generation_config={"temperature": 0.0}
                             )
-                            
                             chat = model_fast.start_chat(history=[])
+                            t_str = "、".join(selected_types)
+                            prompt_content = f"""
+                            任務：分析以下教材並產出審核表。
+                            【參數】年級：{grade}, 科目：{subject}, 可用題型：{t_str}
+                            【教材】{content}
+                            【步驟】
+                            1. 識別單元結構與學習目標。
+                            2. 依重要性與篇幅分配 100 分。
+                            3. 輸出 Markdown 表格。
+                            """
+                            st.session_state.last_prompt_content = prompt_content
+                            response = generate_with_retry(chat, prompt_content, stream=False)
                             
-                            with st.chat_message("ai"):
-                                message_placeholder = st.empty()
-                                full_response = ""
-                                t_str = "、".join(selected_types)
-                                
-                                prompt_content = f"""
-                                任務：分析以下教材並產出審核表。
-                                【參數設定】年級：{grade}, 科目：{subject}, 可用題型：{t_str}
-                                【教材內容】{content}
-                                【執行步驟】
-                                1. 識別教材中的單元結構。
-                                2. 提取具體的學習目標。
-                                3. 根據內容長度，計算該單元應佔總分 100 分中的多少比例。
-                                4. 僅輸出 Markdown 表格。
-                                """
-                                st.session_state.last_prompt_content = prompt_content
-                                response = generate_with_retry(chat, prompt_content, stream=True)
-                                
-                                for chunk in response:
-                                    if chunk.text:
-                                        full_response += chunk.text
-                                        message_placeholder.markdown(full_response + "▌")
-                                message_placeholder.markdown(full_response)
-                            
-                            # 簡單防呆
-                            if "|" in full_response and "單元" in full_response:
-                                st.session_state.chat_history.append({"role": "model", "content": full_response})
+                            if "|" in response.text and "單元" in response.text:
+                                st.session_state.chat_history.append({"role": "model", "content": response.text})
+                                # 預先解析成 DataFrame 並存入 Session
+                                st.session_state.df_preview = parse_md_to_df(response.text)
                                 st.session_state.phase = 2
-                                time.sleep(1)
+                                st.session_state.subject = subject # 記住科目以便 Phase 2 使用
                                 st.rerun()
-                            else:
-                                st.error("❌ AI 產出格式異常，未偵測到表格，請重試。")
-                                
-                        except Exception as e: 
-                            st.error(f"連線失敗：{e} (請檢查 API Key 或稍後重試)")
+                            else: st.error("❌ 格式異常，請重試")
+                        except Exception as e: st.error(f"連線失敗：{e}")
 
-# --- Phase 2: 下載與確認 ---
+# --- Phase 2: 線上編輯與下載 ---
 elif st.session_state.phase == 2:
-    current_md = st.session_state.chat_history[0]["content"]
-    
     with st.container(border=True):
-        st.markdown("### 📥 第二階段：下載審核表")
-        st.info("請下載 Excel 表格，確認配分與學習目標是否正確。確認無誤後請點擊下方按鈕進入出題階段。")
+        st.markdown("### 📝 第二階段：審核與編輯")
+        st.info("請在下方表格直接修改「對應題型」或「學習目標」。確認無誤後再下載 Excel。")
         
-        with st.expander("👁️ 預覽 AI 產出的表格內容", expanded=False):
-            st.markdown(current_md)
-        
-        # Excel 轉換 (包含自動配分校正)
-        excel_data = md_to_excel(current_md)
-        
-        c1, c2 = st.columns([1, 1])
-        with c1:
-            if excel_data:
-                st.download_button(
-                    label="📥 下載 Excel 審核表 (.xlsx)",
-                    data=excel_data,
-                    file_name=f"內湖國小_{st.session_state.get('subject', '科目')}_審核表.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True
-                )
+        # 取得當前科目的可用題型
+        current_subject = st.session_state.get("subject", "")
+        valid_types = SUBJECT_Q_TYPES.get(current_subject, SUBJECT_Q_TYPES[""])
+
+        # 使用 Data Editor 讓使用者編輯
+        # 注意：我們把 "對應題型" 設為 Selectbox (下拉選單)
+        if st.session_state.df_preview is not None:
+            edited_df = st.data_editor(
+                st.session_state.df_preview,
+                column_config={
+                    "對應題型": st.column_config.SelectboxColumn(
+                        "對應題型",
+                        help="點擊選擇此題目的考試題型",
+                        width="medium",
+                        options=valid_types,  # 這裡就是下拉選單的選項
+                        required=True,
+                    ),
+                    "預計配分": st.column_config.NumberColumn(
+                        "預計配分",
+                        min_value=0,
+                        max_value=100,
+                        format="%d 分"
+                    )
+                },
+                use_container_width=True,
+                num_rows="dynamic", # 允許新增刪除列
+                hide_index=True
+            )
+            
+            # 即時計算總分給使用者看
+            total_score = edited_df["預計配分"].sum()
+            if total_score != 100:
+                st.warning(f"⚠️ 目前總分：{total_score} 分 (建議調整為 100 分)")
             else:
-                st.warning("⚠️ 表格轉換失敗")
-        
-        with c2:
-             if st.button("⬅️ 返回重來 (清除資料)", use_container_width=True):
+                st.success(f"✅ 目前總分：{total_score} 分")
+
+            # Excel 轉換 (使用編輯後的 DataFrame)
+            excel_data = df_to_excel(edited_df)
+            
+            col1, col2 = st.columns([1, 1])
+            with col1:
+                if excel_data:
+                    st.download_button(
+                        label="📥 下載 Excel 審核表",
+                        data=excel_data,
+                        file_name=f"內湖國小_{current_subject}_審核表.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True
+                    )
+            with col2:
+                if st.button("⬅️ 返回重來", use_container_width=True):
+                    st.session_state.phase = 1
+                    st.session_state.chat_history = []
+                    st.session_state.df_preview = None
+                    st.rerun()
+        else:
+            st.error("⚠️ 資料遺失，請重新生成。")
+            if st.button("返回"):
                 st.session_state.phase = 1
-                st.session_state.chat_history = []
                 st.rerun()
 
     st.divider()
-    
     if st.button("✅ 審核無誤，開始正式命題 (Phase 3)", type="primary", use_container_width=True):
-        st.toast("🚀 進入 Phase 3... (功能開發中)", icon="🚧")
-        # 未來功能：
-        # st.session_state.phase = 3
-        # st.rerun()
+        st.toast("🚀 進入 Phase 3...", icon="🚧")
 
 st.markdown('<div class="custom-footer">© 2026 新竹市香山區內湖國小. All Rights Reserved.</div>', unsafe_allow_html=True)
