@@ -20,7 +20,7 @@ SUBJECT_Q_TYPES = {
     "": ["單選題", "是非題", "填充題", "簡答題"]
 }
 
-# --- 2. 檔案讀取工具 ---
+# --- 2. 工具函式 (讀取、模型偵測、資料處理) ---
 @st.cache_data
 def extract_text_from_files(files):
     text_content = ""
@@ -41,6 +41,14 @@ def extract_text_from_files(files):
         except: text_content += f"\n[讀取錯誤: {file.name}]"
     return text_content
 
+def find_available_model(api_key, keyword="flash"):
+    genai.configure(api_key=api_key)
+    try:
+        models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        target = next((m for m in models if keyword in m.lower()), models[0])
+        return target, None
+    except Exception as e: return None, str(e)
+
 def process_table_data(md_text):
     try:
         cleaned = md_text.replace("｜", "|").replace("**", "").replace("||", "|\n|")
@@ -57,34 +65,7 @@ def process_table_data(md_text):
         return pd.DataFrame(rows, columns=headers)
     except: return None
 
-# --- 3. 智能模型尋找器 ---
-def find_available_model(api_key, keyword="flash"):
-    """自動偵測 API Key 下可用的模型名稱"""
-    genai.configure(api_key=api_key)
-    try:
-        # 列出所有支援內容生成的模型
-        available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        # 優先找包含關鍵字 (如 flash 或 pro) 的模型
-        target = next((m for m in available_models if keyword in m.lower()), available_models[0])
-        return target, None
-    except Exception as e:
-        return None, str(e)
-
-def generate_with_retry(model_or_chat, prompt, stream=True):
-    max_retries = 3
-    for i in range(max_retries):
-        try:
-            if hasattr(model_or_chat, 'send_message'): return model_or_chat.send_message(prompt, stream=stream)
-            else: return model_or_chat.generate_content(prompt, stream=stream)
-        except Exception as e:
-            if "429" in str(e):
-                wait = (i + 1) * 5
-                st.toast(f"⏳ 伺服器忙碌，{wait}秒後重試...", icon="⚠️")
-                time.sleep(wait)
-            else: raise e
-    raise Exception("重試次數過多")
-
-# --- 4. 介面視覺設計 ---
+# --- 3. 介面視覺設計 (延續無捲軸、隱藏 Header 指令) ---
 st.set_page_config(page_title="內湖國小 AI 輔助出題系統", layout="wide")
 
 st.markdown("""
@@ -106,7 +87,7 @@ st.markdown("""
     </div>
     """, unsafe_allow_html=True)
 
-# 狀態
+# 狀態管理
 if "phase" not in st.session_state: st.session_state.phase = 1 
 if "chat_history" not in st.session_state: st.session_state.chat_history = []
 if "last_prompt_content" not in st.session_state: st.session_state.last_prompt_content = ""
@@ -115,15 +96,15 @@ if "last_prompt_content" not in st.session_state: st.session_state.last_prompt_c
 with st.sidebar:
     st.markdown("### 🚀 快速指南")
     st.markdown("""<div class="comfort-box"><ol style="margin:0; padding-left:1.2rem;">
-        <li>前往 <a href="https://aistudio.google.com/" target="_blank">AI Studio (點我)</a></li>
+        <li>前往 <a href="https://aistudio.google.com/" target="_blank">AI Studio</a></li>
         <li>登入<b>個人 Google 帳號</b></li>
-        <li>點擊 <b>Get API key</b> 並複製貼入下方</li></ol></div>""", unsafe_allow_html=True)
+        <li>貼入下方欄位</li></ol></div>""", unsafe_allow_html=True)
     api_input = st.text_area("在此輸入 API Key", height=70)
     if st.button("🔄 重置系統"):
         for k in ["phase", "chat_history", "last_prompt_content"]: st.session_state[k] = (1 if k=="phase" else [] if k=="chat_history" else "")
         st.rerun()
     st.markdown("### 📚 資源連結")
-    st.markdown("""<div class="comfort-box"><b>教材：</b><a href="https://webetextbook.knsh.com.tw/" target="_blank">康軒</a> | <a href="https://edisc3.hle.com.tw/" target="_blank">翰林</a> | <a href="https://reader.nani.com.tw/" target="_blank">南一</a><br><b>參考：</b><a href="https://cirn.moe.edu.tw/Syllabus/index.aspx?sid=1108" target="_blank">108課綱</a> | <a href="https://www.nhps.hc.edu.tw/" target="_blank">校網</a></div>""", unsafe_allow_html=True)
+    st.markdown("""<div class="comfort-box"><b>教材下載：</b><a href="https://webetextbook.knsh.com.tw/" target="_blank">康軒</a> | <a href="https://edisc3.hle.com.tw/" target="_blank">翰林</a> | <a href="https://reader.nani.com.tw/" target="_blank">南一</a></div>""", unsafe_allow_html=True)
 
 # --- Phase 1: 參數設定與教材上傳 ---
 if st.session_state.phase == 1:
@@ -134,8 +115,8 @@ if st.session_state.phase == 1:
         with c2: subject = st.selectbox("2. 科目", ["", "國語", "數學", "自然科學", "社會", "英語"])
         with c3: mode = st.selectbox("3. 模式", ["🟢 適中", "🔴 困難", "🌟 素養"])
         
-        st.markdown("**4. 勾選欲產出的題型**")
         available_types = SUBJECT_Q_TYPES.get(subject, SUBJECT_Q_TYPES[""])
+        st.markdown("**4. 勾選欲產出的題型**")
         cols = st.columns(min(len(available_types), 4))
         selected_types = [t for i, t in enumerate(available_types) if cols[i % len(cols)].checkbox(t, value=True)]
         
@@ -145,35 +126,20 @@ if st.session_state.phase == 1:
             if not api_input or not grade or not subject or not uploaded_files:
                 st.warning("⚠️ 請補齊 API Key、參數或教材。")
             else:
-                with st.spinner("⚡ 正在搜尋可用模型並分析教材..."):
+                with st.spinner("⚡ 正在分析教材..."):
                     target_key = api_input.strip()
-                    # 關鍵修正：自動尋找正確的模型字串
                     model_name, error = find_available_model(target_key, "flash")
-                    
-                    if error:
-                        st.error(f"❌ 無法讀取模型清單，請確認 API Key 是否有效：{error}")
+                    if error: st.error(f"❌ 模型連線錯誤：{error}")
                     else:
                         content = extract_text_from_files(uploaded_files)
                         try:
-                            st.toast(f"✅ 已偵測可用模型：{model_name}")
-                            model = genai.GenerativeModel(model_name, system_instruction="你僅產出表格，欄位：| 單元名稱 | 學習目標(原文) | 對應題型 | 預計配分 |。絕對禁止出題！")
-                            chat = model.start_chat(history=[])
-                            prompt = f"年級：{grade}, 科目：{subject}\n題型：{'、'.join(selected_types)}\n命題模式：{mode}\n教材：{content}"
-                            st.session_state.last_prompt_content = prompt
-                            
-                            with st.chat_message("ai"):
-                                placeholder = st.empty()
-                                full_res = ""
-                                res = generate_with_retry(chat, prompt)
-                                for chunk in res:
-                                    full_res += chunk.text
-                                    placeholder.markdown(full_res + "▌")
-                                placeholder.markdown(full_res)
-                            
-                            st.session_state.chat_history.append({"role": "model", "content": full_res})
+                            model = genai.GenerativeModel(model_name, system_instruction="僅產出表格：| 單元名稱 | 學習目標(原文) | 對應題型 | 預計配分 |。嚴禁出題！")
+                            st.session_state.last_prompt_content = f"年級：{grade}, 科目：{subject}\n題型：{'、'.join(selected_types)}\n命題模式：{mode}\n教材：{content}"
+                            res = model.generate_content(st.session_state.last_prompt_content)
+                            st.session_state.chat_history.append({"role": "model", "content": res.text})
                             st.session_state.phase = 2
                             st.rerun()
-                        except Exception as e: st.error(f"連線失敗：{e}")
+                        except Exception as e: st.error(f"分析失敗：{e}")
 
 # --- Phase 2: 確認與出題 ---
 elif st.session_state.phase == 2:
@@ -186,36 +152,20 @@ elif st.session_state.phase == 2:
         with c_d1:
             try:
                 buf = io.BytesIO()
-                with pd.ExcelWriter(buf, engine='openpyxl') as writer: df.to_excel(writer, index=False)
+                with pd.ExcelWriter(buf, engine='xlsxwriter') as writer: df.to_excel(writer, index=False)
                 st.download_button("📥 下載 Excel 審核表", data=buf.getvalue(), file_name="審核表.xlsx", use_container_width=True)
-            except: st.caption("環境不支援 Excel，請用 CSV。")
+            except Exception as e:
+                st.caption(f"Excel 匯出失敗 (請確認已安裝 xlsxwriter)。")
         with c_d2:
             st.download_button("📥 下載 CSV 審核表 (保險用)", data=df.to_csv(index=False).encode('utf-8-sig'), file_name="審核表.csv", use_container_width=True)
 
     st.divider()
-    with st.container(border=True):
-        st.markdown("### 📝 第二階段：正式出題")
-        if st.button("✅ 確認無誤，開始出題", type="primary", use_container_width=True):
-            with st.spinner("🧠 正在自動匹配最強模型並命題中..."):
-                target_key = api_input.strip()
-                # 自動找 Pro 模型
-                model_name_pro, error = find_available_model(target_key, "pro")
-                
-                if model_name_pro:
-                    st.toast(f"🧠 切換至旗艦大腦：{model_name_pro}")
-                    model_pro = genai.GenerativeModel(model_name_pro, system_instruction="請根據審核表產出正式試卷與參考答案。")
-                    with st.chat_message("ai"):
-                        placeholder = st.empty()
-                        full_res = ""
-                        res = generate_with_retry(model_pro, f"{st.session_state.last_prompt_content}\n---\n參考審核表：\n{current_md}\n\n請正式出題。")
-                        for chunk in res:
-                            full_res += chunk.text
-                            placeholder.markdown(full_res + "▌")
-                        placeholder.markdown(full_res)
-                    st.session_state.chat_history.append({"role": "model", "content": full_res})
-
-        if st.button("⬅️ 返回修改參數", use_container_width=True):
-            st.session_state.phase = 1
+    if st.button("✅ 確認無誤，開始出題", type="primary", use_container_width=True):
+        with st.spinner("🧠 深度命題中..."):
+            model_name_pro, _ = find_available_model(api_input.strip(), "pro")
+            model_pro = genai.GenerativeModel(model_name_pro)
+            res = model_pro.generate_content(f"{st.session_state.last_prompt_content}\n---\n參考審核表：\n{current_md}\n\n請正式出題。")
+            st.session_state.chat_history.append({"role": "model", "content": res.text})
             st.rerun()
     
     if len(st.session_state.chat_history) > 1:
