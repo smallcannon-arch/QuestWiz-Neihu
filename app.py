@@ -3,6 +3,7 @@ import google.generativeai as genai
 import random
 import io
 import time
+import re # 引入正規表示式
 from pypdf import PdfReader
 from docx import Document
 import pandas as pd
@@ -42,58 +43,59 @@ def extract_text_from_files(files):
             text_content += f"\n[讀取錯誤: {file.name}]"
     return text_content
 
-# --- 3. Excel 下載工具 (抗沾黏暴力版) --- [cite: 2026-02-13]
+# --- 3. Excel 下載工具 (智慧切分終極版) ---
 def md_to_excel(md_text):
     try:
-        # 1. 預處理：解決 AI 忘記換行的問題 (|| 強制轉為換行)
-        # 有時候 AI 會輸出 "| 資料A || 資料B |"，這裡把它修復為 "| 資料A |\n| 資料B |"
-        cleaned_text = md_text.replace("||", "|\n|")
+        # 1. 預處理：符號正規化
+        # 將全形｜轉為半形 |，移除 Markdown 粗體符號 **
+        cleaned_text = md_text.replace("｜", "|").replace("**", "")
         
-        lines = cleaned_text.strip().split('\n')
-        table_lines = []
-        is_table_started = False
+        # 2. 尋找標題列 (Anchor)
+        # 不管有無換行，先嘗試用 regex 抓出標題區塊
+        # 標題特徵：| 單元名稱 | ... | 預計配分 |
+        header_match = re.search(r'\|\s*單元名稱\s*\|\s*學習目標.*\|\s*對應題型\s*\|\s*預計配分\s*\|', cleaned_text)
         
-        # 2. 錨點搜尋
-        for line in lines:
-            # 寬鬆判定：只要有 "|" 且看起來像標題
-            if ("單元名稱" in line or "學習目標" in line) and "|" in line:
-                is_table_started = True
-                table_lines.append(line)
-                continue
-            
-            if is_table_started:
-                if "---" in line: continue
-                if "|" in line:
-                    table_lines.append(line)
-                
-        if not table_lines: return None
+        if not header_match:
+            return None, "❌ 找不到表格標題列 (需包含：單元名稱、學習目標...)"
 
-        # 3. 解析資料
-        data = []
-        for line in table_lines:
-            row = [cell.strip() for cell in line.split('|')]
-            # 清理頭尾空字串
-            if len(row) > 0 and row[0] == '': row.pop(0)
-            if len(row) > 0 and row[-1] == '': row.pop()
-            data.append(row)
-
-        if len(data) < 2: return None
-
-        headers = data[0]
-        rows = data[1:]
+        # 3. 提取所有儲存格資料
+        # 從標題開始，抓取後續所有透過 | 分隔的內容
+        start_index = header_match.start()
+        table_content = cleaned_text[start_index:]
         
-        # 4. 強力補齊與切削
-        max_cols = len(headers)
-        cleaned_rows = []
-        for r in rows:
-            if len(r) == max_cols:
-                cleaned_rows.append(r)
-            elif len(r) < max_cols:
-                cleaned_rows.append(r + [''] * (max_cols - len(r)))
-            else:
-                cleaned_rows.append(r[:max_cols])
+        # 使用 split('|') 將所有內容切成碎片
+        # 過濾掉空字串、換行符、分隔線(---)
+        raw_cells = [
+            c.strip() 
+            for c in table_content.split('|') 
+            if c.strip() and '---' not in c
+        ]
+        
+        # 4. 智慧重組 (Smart Chunking)
+        # 我們知道標準表格是 4 個欄位 (單元, 目標, 題型, 配分)
+        num_cols = 4 
+        
+        # 檢查欄位數是否正確
+        if len(raw_cells) < num_cols:
+            return None, f"❌ 資料量不足 (僅 {len(raw_cells)} 個欄位)"
 
-        df = pd.DataFrame(cleaned_rows, columns=headers)
+        headers = raw_cells[:num_cols] # 前 4 個是標題
+        data_cells = raw_cells[num_cols:] # 後面全是資料
+        
+        # 將資料每 4 個一組切分
+        rows = []
+        for i in range(0, len(data_cells), num_cols):
+            row = data_cells[i : i + num_cols]
+            # 如果最後一列不滿 4 個，補空值
+            if len(row) < num_cols:
+                row += [''] * (num_cols - len(row))
+            rows.append(row)
+
+        if not rows:
+            return None, "❌ 表格內無資料"
+
+        # 5. 轉成 DataFrame
+        df = pd.DataFrame(rows, columns=headers)
         
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
@@ -102,25 +104,24 @@ def md_to_excel(md_text):
             for i, col in enumerate(df.columns):
                 worksheet.set_column(i, i, 25)
                 
-        return output.getvalue()
-    except Exception as e:
-        print(f"Excel 轉換失敗: {e}")
-        return None
+        return output.getvalue(), None # 成功回傳 (data, error=None)
 
-# --- 4. 核心 Gem 命題鐵律 (強化封口令) ---
+    except Exception as e:
+        return None, f"❌ 程式轉換錯誤: {str(e)}"
+
+# --- 4. 核心 Gem 命題鐵律 ---
 GEM_INSTRUCTIONS = """
 你是「國小專業定期評量命題 AI」。
 
-### ⚠️ Phase 1 絕對規則 (違反將導致任務失敗)：
-1. **任務目標**：僅產出【學習目標審核表】。
-2. **禁止事項**：
-   - ❌ **嚴禁**產出任何試題 (如選擇題、是非題)。
-   - ❌ **嚴禁**產出答案或解析。
-   - ❌ **嚴禁**撰寫前言 (如 "好的，這是我整理的...") 或結語。
-3. **格式要求**：
-   - 必須是標準 Markdown 表格。
-   - 欄位：| 單元名稱 | 學習目標(原文) | 對應題型 | 預計配分 |
-   - **每一列資料必須強制換行**，不可接在同一行。
+### ⚠️ Phase 1 絕對規則：
+1. **任務**：僅產出【學習目標審核表】。
+2. **禁止**：
+   - ❌ 嚴禁產出試題。
+   - ❌ 嚴禁任何前言或結語。
+3. **格式**：
+   - 請使用標準 Markdown 表格。
+   - 欄位順序必須為：| 單元名稱 | 學習目標(原文) | 對應題型 | 預計配分 |
+   - **請確保每個儲存格內容不要包含換行符號**，以免表格破裂。
 """
 
 # --- 5. 智能模型選擇與重試機制 ---
@@ -307,7 +308,6 @@ if st.session_state.phase == 1:
                                 full_response = ""
                                 t_str = "、".join(selected_types)
                                 
-                                # 強制指令：不准出題，表格必須換行 [cite: 2026-02-13]
                                 prompt_content = f"""
                                 任務：Phase 1 學習目標提取
                                 年級：{grade}, 科目：{subject}
@@ -318,10 +318,9 @@ if st.session_state.phase == 1:
                                 請產出【學習目標審核表】。
                                 
                                 **⚠️ 嚴格格式要求：**
-                                1. 僅產出表格，**嚴禁**產出試題或題目。
-                                2. 請直接輸出 Markdown 表格，不要包含 ```markdown 符號。
-                                3. **每一列資料必須強制換行**，禁止使用 || 連接。
-                                4. 表格標題行：| 單元名稱 | 學習目標(原文) | 對應題型 | 預計配分 |
+                                1. 僅產出表格，**嚴禁**產出試題。
+                                2. 表格標題行必須包含：| 單元名稱 | 學習目標(原文) | 對應題型 | 預計配分 |
+                                3. **請確保每個儲存格內容不要包含換行符號**。
                                 """
                                 st.session_state.last_prompt_content = prompt_content
                                 
@@ -339,7 +338,7 @@ if st.session_state.phase == 1:
                                 st.session_state.phase = 2
                                 st.rerun()
                         except Exception as e: 
-                            st.error(f"連線失敗：{e} (請檢查 API Key 或稍後重試)")
+                            st.error(f"連線失敗：{e}")
 
 # --- Phase 2: 正式出題 ---
 elif st.session_state.phase == 2:
@@ -349,11 +348,14 @@ elif st.session_state.phase == 2:
         st.markdown("### 📥 第二階段：下載審核表")
         with st.chat_message("ai"): st.markdown(current_md)
         
-        excel_data = md_to_excel(current_md)
+        # 呼叫新的轉換函數，並接收錯誤訊息
+        excel_data, error_msg = md_to_excel(current_md)
+        
         if excel_data:
             st.download_button(label="📥 匯出此審核表 (Excel)", data=excel_data, file_name=f"內湖國小_{subject}_審核表.xlsx", use_container_width=True)
         else:
-            st.warning("⚠️ 偵測到表格格式可能不完整，請查看下方原始資料。")
+            # 顯示具體錯誤原因
+            st.error(f"⚠️ 表格轉換失敗：{error_msg}")
             with st.expander("🔍 查看 AI 原始輸出 (Debug)"):
                 st.text(current_md)
 
