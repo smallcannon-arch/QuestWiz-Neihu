@@ -59,7 +59,60 @@ GEM_INSTRUCTIONS = """
 3. **分階段輸出**：Phase 1 審核表，Phase 2 試卷與答案。
 """
 
-# --- 5. 網頁介面視覺設計 ---
+# --- 5. 智能模型選擇器 (修復 404 錯誤) ---
+def get_best_model(api_key, mode="fast"):
+    """
+    自動偵測可用模型，避免寫死名稱導致報錯。
+    mode="fast": 優先找 flash, 其次 gemini-pro
+    mode="smart": 優先找 pro, 其次 1.5, 最後 gemini-pro
+    """
+    genai.configure(api_key=api_key)
+    try:
+        # 列出所有支援 generateContent 的模型
+        models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        
+        if not models:
+            return None, "找不到任何可用模型"
+
+        # 根據需求挑選
+        target_model = None
+        
+        if mode == "fast":
+            # 優先找名字裡有 'flash' 的
+            for m in models:
+                if 'flash' in m.lower():
+                    target_model = m
+                    break
+            # 沒找到 flash，就找 gemini-pro (通常比較快)
+            if not target_model:
+                for m in models:
+                    if 'gemini-pro' in m.lower() and 'vision' not in m.lower():
+                        target_model = m
+                        break
+        
+        elif mode == "smart":
+            # 優先找名字裡有 'pro' 且是 '1.5' 的
+            for m in models:
+                if 'pro' in m.lower() and '1.5' in m.lower():
+                    target_model = m
+                    break
+            # 沒找到 1.5 pro，找任何 pro
+            if not target_model:
+                for m in models:
+                    if 'pro' in m.lower():
+                        target_model = m
+                        break
+        
+        # 還是沒找到？隨便給一個
+        if not target_model:
+            target_model = models[0]
+            
+        return target_model, None
+        
+    except Exception as e:
+        return None, str(e)
+
+# --- 6. 網頁介面視覺設計 ---
 st.set_page_config(page_title="內湖國小 AI 輔助出題系統", layout="wide")
 
 st.markdown("""
@@ -98,7 +151,7 @@ st.markdown("""
 # 狀態管理
 if "phase" not in st.session_state: st.session_state.phase = 1 
 if "chat_history" not in st.session_state: st.session_state.chat_history = []
-if "last_prompt_content" not in st.session_state: st.session_state.last_prompt_content = "" # 用來傳遞 Phase 1 的內容給 Phase 2
+if "last_prompt_content" not in st.session_state: st.session_state.last_prompt_content = ""
 
 # --- Sidebar ---
 with st.sidebar:
@@ -147,11 +200,10 @@ with st.sidebar:
         st.session_state.last_prompt_content = ""
         st.rerun()
 
-# --- Phase 1: 快速模型 (Flash) 規劃審核表 ---
+# --- Phase 1: 規劃審核表 (使用快速模型) ---
 if st.session_state.phase == 1:
     with st.container(border=True):
         st.markdown("### 📍 第一階段：參數設定與學習目標規劃")
-        st.caption("🚀 此階段將使用 **Gemini 1.5 Flash (極速版)** 快速掃描教材")
         
         c1, c2, c3 = st.columns(3)
         with c1: grade = st.selectbox("1. 選擇年級", ["", "一年級", "二年級", "三年級", "四年級", "五年級", "六年級"], index=0)
@@ -176,50 +228,58 @@ if st.session_state.phase == 1:
             elif not grade or not subject or not uploaded_files or not selected_types:
                 st.warning("⚠️ 動作中止：請確認年級、科目、題型與教材已備妥。")
             else:
+                # 取得可用 Key
                 keys = [k.strip() for k in api_input.replace('\n', ',').split(',') if k.strip()]
-                genai.configure(api_key=random.choice(keys))
+                target_key = random.choice(keys)
                 
-                content = ""
-                for f in uploaded_files:
-                    ext = f.name.split('.')[-1].lower()
-                    if ext == 'pdf': content += read_pdf(f)
-                    elif ext == 'docx': content += read_docx(f)
-                    elif ext == 'doc': content += read_doc(f)
+                # 自動偵測最佳模型 (Fast Mode)
+                model_name, error_msg = get_best_model(target_key, mode="fast")
                 
-                try:
-                    # Phase 1: 使用 Flash 模型 (速度優先)
-                    model_flash = genai.GenerativeModel(
-                        model_name="gemini-1.5-flash", # 指定 Flash
-                        system_instruction=GEM_INSTRUCTIONS, 
-                        generation_config={"temperature": 0.0}
-                    )
+                if error_msg:
+                    st.error(f"❌ API 連線錯誤：{error_msg}")
+                else:
+                    content = ""
+                    for f in uploaded_files:
+                        ext = f.name.split('.')[-1].lower()
+                        if ext == 'pdf': content += read_pdf(f)
+                        elif ext == 'docx': content += read_docx(f)
+                        elif ext == 'doc': content += read_doc(f)
                     
-                    st.toast("⚡ 啟動極速引擎 (Flash) 分析教材中...")
-                    
-                    with st.chat_message("ai"):
-                        message_placeholder = st.empty()
-                        full_response = ""
-                        t_str = "、".join(selected_types)
-                        # 將此 Prompt 存起來，傳給 Phase 2 當作背景知識
-                        prompt_content = f"年級：{grade}, 科目：{subject}\n題型：{t_str}\n教材內容：\n{content}"
-                        st.session_state.last_prompt_content = prompt_content # 儲存 Context
+                    try:
+                        # 顯示目前使用的模型名稱
+                        st.toast(f"⚡ 正使用高速模型 ({model_name}) 分析中...")
                         
-                        response = model_flash.generate_content(prompt_content + "\n\n請根據以上教材產出【學習目標審核表】。", stream=True)
+                        model_fast = genai.GenerativeModel(
+                            model_name=model_name,
+                            system_instruction=GEM_INSTRUCTIONS, 
+                            generation_config={"temperature": 0.0}
+                        )
                         
-                        for chunk in response:
-                            full_response += chunk.text
-                            message_placeholder.markdown(full_response + "▌")
-                        message_placeholder.markdown(full_response)
-                    
-                    if "ERROR_SUBJECT_MISMATCH" in full_response:
-                        st.error(f"❌ 防呆啟動：教材內容與『{subject}』不符，請重新確認檔案。")
-                    else:
-                        st.session_state.chat_history.append({"role": "model", "content": full_response})
-                        st.session_state.phase = 2
-                        st.rerun()
-                except Exception as e: st.error(f"連線失敗 (請確認 API Key 是否支援 Flash 模型)：{e}")
+                        chat = model_fast.start_chat(history=[])
+                        
+                        with st.chat_message("ai"):
+                            message_placeholder = st.empty()
+                            full_response = ""
+                            t_str = "、".join(selected_types)
+                            prompt_content = f"年級：{grade}, 科目：{subject}\n題型：{t_str}\n教材內容：\n{content}"
+                            st.session_state.last_prompt_content = prompt_content
+                            
+                            response = chat.send_message(prompt_content, stream=True)
+                            
+                            for chunk in response:
+                                full_response += chunk.text
+                                message_placeholder.markdown(full_response + "▌")
+                            message_placeholder.markdown(full_response)
+                        
+                        if "ERROR_SUBJECT_MISMATCH" in full_response:
+                            st.error(f"❌ 防呆啟動：教材內容與『{subject}』不符，請重新確認檔案。")
+                        else:
+                            st.session_state.chat_history.append({"role": "model", "content": full_response})
+                            st.session_state.phase = 2
+                            st.rerun()
+                    except Exception as e: st.error(f"連線失敗：{e}")
 
-# --- Phase 2: 強大模型 (Pro) 正式出題 ---
+# --- Phase 2: 正式出題 (使用強力模型) ---
 elif st.session_state.phase == 2:
     current_md = st.session_state.chat_history[0]["content"]
     
@@ -233,104 +293,52 @@ elif st.session_state.phase == 2:
     st.divider()
     with st.container(border=True):
         st.markdown("### 📝 第三階段：試卷正式生成")
-        st.caption("🧠 此階段將切換至 **Gemini 1.5 Pro (旗艦版)** 模型，以確保出題品質與邏輯深度")
         
         cb1, cb2 = st.columns(2)
         with cb1:
             if st.button("✅ 審核表確認無誤，開始出題", type="primary", use_container_width=True):
-                # Phase 2: 切換至 Pro 模型 (品質優先)
                 keys = [k.strip() for k in api_input.replace('\n', ',').split(',') if k.strip()]
-                genai.configure(api_key=random.choice(keys))
+                target_key = random.choice(keys)
                 
-                try:
-                    # 嘗試使用 Pro 模型，如果 Key 不支援則自動降級回 Flash
-                    target_model = "gemini-1.5-pro"
-                    available_models = [m.name for m in genai.list_models()]
-                    # 簡單檢查，若無 Pro 權限可考慮 fallback，但通常教育帳號都有
+                # 自動偵測最佳模型 (Smart Mode)
+                model_name, error_msg = get_best_model(target_key, mode="smart")
+                
+                if error_msg:
+                     st.error(f"❌ 無法啟動高階模型：{error_msg}")
+                else:
+                    st.toast(f"🧠 正使用旗艦模型 ({model_name}) 命題中...")
                     
-                    model_pro = genai.GenerativeModel(
-                        model_name=target_model, 
-                        system_instruction=GEM_INSTRUCTIONS,
-                        generation_config={"temperature": 0.2} # 稍微增加一點創造力
-                    )
-                    
-                    st.toast("🧠 啟動旗艦大腦 (Pro) 命題中...請稍候")
-                    
-                    with st.chat_message("ai"):
-                        message_placeholder = st.empty()
-                        full_response = ""
+                    try:
+                        model_smart = genai.GenerativeModel(
+                            model_name=model_name,
+                            system_instruction=GEM_INSTRUCTIONS,
+                            generation_config={"temperature": 0.2}
+                        )
                         
-                        # 構建新的 Prompt，包含 Phase 1 的上下文
-                        # 這裡不使用 chat session，而是直接將背景資訊一次餵給 Pro 模型，避免 session 格式問題
-                        final_prompt = f"""
-                        {st.session_state.last_prompt_content}
+                        with st.chat_message("ai"):
+                            message_placeholder = st.empty()
+                            full_response = ""
+                            final_prompt = f"""
+                            {st.session_state.last_prompt_content}
+                            ---
+                            審核表參考：
+                            {current_md}
+                            
+                            請正式產出【試題】與【參考答案卷】。
+                            """
+                            response = model_smart.generate_content(final_prompt, stream=True)
+                            for chunk in response:
+                                full_response += chunk.text
+                                message_placeholder.markdown(full_response + "▌")
+                            message_placeholder.markdown(full_response)
                         
-                        ---
-                        
-                        以上是教材內容。
-                        你剛才已經產出了以下審核表：
-                        {current_md}
-                        
-                        現在，請根據這份審核表，正式產出【試題】與【參考答案卷】。
-                        """
-                        
-                        response = model_pro.generate_content(final_prompt, stream=True)
-                        for chunk in response:
-                            full_response += chunk.text
-                            message_placeholder.markdown(full_response + "▌")
-                        message_placeholder.markdown(full_response)
-                    
-                    st.session_state.chat_history.append({"role": "model", "content": full_response})
-                    # 為了讓後續對話能延續，這裡我們可以把 Pro 建立為 session (選擇性，或繼續用單次問答)
-                    
-                except Exception as e:
-                    st.error(f"Pro 模型啟動失敗 (可能 Key 權限不足，將嘗試 Flash): {e}")
-                    # Fallback logic could go here
+                        st.session_state.chat_history.append({"role": "model", "content": full_response})
+                    except Exception as e: st.error(f"命題失敗：{e}")
 
         with cb2:
             if st.button("⬅️ 返回修改參數", use_container_width=True):
                 st.session_state.phase = 1
                 st.session_state.chat_history = []
                 st.rerun()
-    
-    # 顯示出題結果
-    if len(st.session_state.chat_history) > 1:
-        # 這裡不重複顯示剛剛串流出來的內容，而是顯示歷史紀錄
-        # 但因為上面的串流是在 button 內，rerun 後會消失，所以需要在此處 render
-        # 不過因為我們沒有在 button 後 rerun (為了保留串流畫面)，所以這裡主要處理 "微調" 的顯示
-        pass 
-
-    # 微調對話框 (使用 Pro)
-    if len(st.session_state.chat_history) > 0:
-        if prompt := st.chat_input("對題目不滿意？請輸入指令微調 (如：第3題太難請換一題)"):
-            with st.chat_message("user"): st.markdown(prompt)
-            
-            # 微調時同樣使用 Pro
-            keys = [k.strip() for k in api_input.replace('\n', ',').split(',') if k.strip()]
-            genai.configure(api_key=random.choice(keys))
-            model_pro = genai.GenerativeModel("gemini-1.5-pro", system_instruction=GEM_INSTRUCTIONS)
-            
-            # 建立臨時對話歷史
-            history_for_chat = []
-            # 把 Phase 1 教材內容當作 User 輸入
-            history_for_chat.append({"role": "user", "parts": [st.session_state.last_prompt_content]})
-            # 把 Phase 1 審核表當作 Model 回答
-            history_for_chat.append({"role": "model", "parts": [current_md]})
-            # 把 Phase 2 題目當作 Model 回答 (如果有的話)
-            if len(st.session_state.chat_history) > 1:
-                 history_for_chat.append({"role": "model", "parts": [st.session_state.chat_history[-1]["content"]]})
-            
-            chat_pro = model_pro.start_chat(history=history_for_chat)
-            
-            with st.chat_message("ai"):
-                message_placeholder = st.empty()
-                full_response = ""
-                response = chat_pro.send_message(prompt, stream=True)
-                for chunk in response:
-                    full_response += chunk.text
-                    message_placeholder.markdown(full_response + "▌")
-                message_placeholder.markdown(full_response)
-            
-            st.session_state.chat_history.append({"role": "model", "content": full_response})
 
 st.markdown('<div class="footer">© 2026 新竹市香山區內湖國小. All Rights Reserved.</div>', unsafe_allow_html=True)
