@@ -55,8 +55,8 @@ def md_to_excel(md_text):
 GEM_INSTRUCTIONS = """
 你是「國小專業定期評量命題 AI」。
 1. **科目守門員**：若教材與科目明顯不符，僅回覆：『ERROR_SUBJECT_MISMATCH』。
-2. **目標對應**：學習目標必須原文採自教材。每一條目標在整份試卷中至少出現一次即可，不須每個題型重複對應。
-3. **兩段式輸出**：第一階段產出【學習目標審核表】，第二階段產出試題與答案。
+2. **目標對應**：學習目標必須原文採自教材。每一條目標在整份試卷中至少出現一次即可。
+3. **分階段輸出**：Phase 1 審核表，Phase 2 試卷與答案。
 """
 
 # --- 5. 網頁介面視覺設計 ---
@@ -73,11 +73,22 @@ st.markdown("""
     .school-name { font-size: 28px; font-weight: 700; color: #F1F5F9; letter-spacing: 3px; }
     .app-title { font-size: 16px; color: #94A3B8; margin-top: 8px; }
     h1, h2, h3, p, span, label, .stMarkdown { color: #E2E8F0 !important; }
-    .step-box { background-color: #1E293B; padding: 12px; border-radius: 10px; margin-bottom: 12px; border-left: 5px solid #3B82F6; font-size: 13px; color: #CBD5E1; }
+    
+    /* 恢復詳細版說明的卡片樣式 */
+    .step-box {
+        background-color: #1E293B; padding: 12px; border-radius: 10px; 
+        margin-bottom: 12px; border-left: 5px solid #3B82F6; font-size: 13px;
+        color: #CBD5E1;
+    }
     .step-box a { color: #60A5FA !important; text-decoration: none; font-weight: bold; }
+    .step-box a:hover { text-decoration: underline; }
+    
+    /* 置中按鈕 */
     [data-testid="stSidebar"] .stButton > button { display: block; margin: 0 auto !important; }
+    
     .footer { position: fixed; left: 0; bottom: 0; width: 100%; background-color: #0F172A; color: #475569; text-align: center; padding: 15px; font-size: 11px; border-top: 1px solid #1E293B; z-index: 100; }
     </style>
+    
     <div class="school-header">
         <div class="school-name">新竹市香山區內湖國小</div>
         <div class="app-title">評量命題與學習目標自動化系統</div>
@@ -89,20 +100,43 @@ if "phase" not in st.session_state: st.session_state.phase = 1
 if "chat_history" not in st.session_state: st.session_state.chat_history = []
 if "chat_session" not in st.session_state: st.session_state.chat_session = None
 
-# --- Sidebar ---
+# --- Sidebar: 恢復詳細引導 ---
 with st.sidebar:
     st.markdown("### 🖥️ 快速開始指南")
     st.markdown("""
-    <div class="step-box"><b>Step 1. 前往官網</b><br>🔗 <a href="https://aistudio.google.com/" target="_blank">Google AI Studio (點我)</a></div>
-    <div class="step-box"><b>Step 2. 取得金鑰</b><br>🆕 點擊 <b>"Get API key"</b> 並複製</div>
+    <div class="step-box">
+        <b>Step 1. 前往官網</b><br>
+        🔗 <a href="https://aistudio.google.com/" target="_blank">Google AI Studio (點我)</a>
+    </div>
+    <div class="step-box">
+        <b>Step 2. 登入帳號</b><br>
+        👤 請登入您的教育 Google 帳號
+    </div>
+    <div class="step-box">
+        <b>Step 3. 取得金鑰</b><br>
+        🆕 點擊 <b>"Get API key"</b> 並複製
+    </div>
+    <div class="step-box">
+        <b>Step 4. 啟用系統</b><br>
+        📋 貼到下方框內即可開始
+    </div>
     """, unsafe_allow_html=True)
     
     api_input = st.text_area("在此輸入 API Key", height=70, placeholder="必填欄位")
     
     st.divider()
+    
     st.markdown("### 📂 資源快速連結")
     st.markdown("""
-    <div class="step-box"><b>📖 教材資源下載</b><br>- <a href="https://webetextbook.knsh.com.tw/" target="_blank">康軒</a> | <a href="https://webetextbook.hle.com.tw/" target="_blank">翰林</a> | <a href="https://www.nani.com.tw/" target="_blank">南一</a></div>
+    <div class="step-box">
+        <b>📖 教材資源下載</b><br>
+        - <a href="https://webetextbook.knsh.com.tw/" target="_blank">康軒</a> | <a href="https://webetextbook.hle.com.tw/" target="_blank">翰林</a> | <a href="https://www.nani.com.tw/" target="_blank">南一</a>
+    </div>
+    <div class="step-box">
+        <b>🏛️ 官方參考資料</b><br>
+        - <a href="https://www.naer.edu.tw/PageSyllabus?nodeid=188" target="_blank">108 課綱領綱</a><br>
+        - <a href="https://www.nhps.hc.edu.tw/" target="_blank">內湖國小校網</a>
+    </div>
     """, unsafe_allow_html=True)
     
     st.divider()
@@ -132,16 +166,15 @@ if st.session_state.phase == 1:
         st.divider()
         uploaded_files = st.file_uploader("5. 上傳教材檔案", type=["pdf", "docx", "doc"], accept_multiple_files=True)
         
-        # --- 按鈕觸發後的防呆邏輯 ---
+        # 按鈕觸發後的防呆邏輯
         if st.button("🚀 產出學習目標審核表", type="primary", use_container_width=True):
             if not api_input:
-                st.error("❌ 動作中止：尚未輸入 API Key，請先完成側邊欄 Step 1-3。")
+                st.error("❌ 動作中止：尚未輸入 API Key。")
             elif not grade or not subject or not uploaded_files or not selected_types:
-                st.warning("⚠️ 動作中止：請確保年級、科目、題型與教材檔案均已備妥。")
+                st.warning("⚠️ 動作中止：請確認年級、科目、題型與教材已備妥。")
             else:
                 keys = [k.strip() for k in api_input.replace('\n', ',').split(',') if k.strip()]
                 genai.configure(api_key=random.choice(keys))
-                
                 content = ""
                 for f in uploaded_files:
                     ext = f.name.split('.')[-1].lower()
@@ -154,11 +187,11 @@ if st.session_state.phase == 1:
                     target = "models/gemini-2.5-flash" if "models/gemini-2.5-flash" in available else available[0]
                     model = genai.GenerativeModel(model_name=target, system_instruction=GEM_INSTRUCTIONS, generation_config={"temperature": 0.0})
                     chat = model.start_chat(history=[])
-                    with st.spinner("⚡ 正在分析教材內容並提取學習目標..."):
+                    with st.spinner("⚡ 正在分析教材內容並原文提取學習目標..."):
                         t_str = "、".join(selected_types)
                         res = chat.send_message(f"年級：{grade}, 科目：{subject}\n題型：{t_str}\n教材：{content}")
                         if "ERROR_SUBJECT_MISMATCH" in res.text:
-                            st.error(f"❌ 防呆啟動：偵測到教材內容與『{subject}』不符，請重新檢查檔案。")
+                            st.error(f"❌ 防呆啟動：教材與『{subject}』不符。")
                         else:
                             st.session_state.chat_session = chat
                             st.session_state.chat_history.append({"role": "model", "content": res.text})
@@ -173,7 +206,7 @@ elif st.session_state.phase == 2:
         st.markdown(current_md)
         excel_data = md_to_excel(current_md)
         if excel_data:
-            st.download_button(label="📥 匯出此審核表 (Excel 格式)", data=excel_data, file_name=f"內湖國小_{subject}_學習目標審核表.xlsx", use_container_width=True)
+            st.download_button(label="📥 匯出此學習目標審核表 (Excel 格式)", data=excel_data, file_name=f"內湖國小_{subject}_審核表.xlsx", use_container_width=True)
 
     st.divider()
     with st.container(border=True):
@@ -194,7 +227,7 @@ elif st.session_state.phase == 2:
     if len(st.session_state.chat_history) > 1:
         for msg in st.session_state.chat_history[1:]:
             with st.chat_message("ai"): st.markdown(msg["content"])
-        if prompt := st.chat_input("微調題目？"):
+        if prompt := st.chat_input("微調試題？"):
             res = st.session_state.chat_session.send_message(prompt)
             st.session_state.chat_history.append({"role": "model", "content": res.text})
             st.rerun()
