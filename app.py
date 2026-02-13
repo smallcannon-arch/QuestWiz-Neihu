@@ -32,7 +32,7 @@ def extract_text_from_files(files):
                 for page in pdf_reader.pages:
                     extracted_text += (page.extract_text() or "") + "\n"
                 if len(extracted_text.strip()) < 10:
-                    text_content += file_header + "[警示] 檔案內容過少，似乎是圖片掃描檔。\n"
+                    text_content += file_header + "[警示] 內容過少，可能是掃描檔，請先轉檔。\n"
                 else:
                     text_content += file_header + extracted_text
 
@@ -62,65 +62,62 @@ def extract_text_from_files(files):
             text_content += f"\n[讀取錯誤] {str(e)}\n"
     return text_content
 
-# --- 3. 邏輯修復：防呆算分系統 ---
+# --- 3. 邏輯核心：防呆算分系統 ---
 def calculate_scores(df):
-    # 初始化欄位，防止計算失敗時導致後續 KeyError
+    # 預先建立必要欄位，防止 KeyError
     if '目標分配節數' not in df.columns: df['目標分配節數'] = 0.0
     if '預計配分' not in df.columns: df['預計配分'] = 0.0
 
     try:
-        # 1. 統一欄位名稱 (防呆)
+        # 1. 欄位名稱標準化
         if '授課節數' in df.columns:
             df.rename(columns={'授課節數': '單元總節數'}, inplace=True)
         
-        # 2. 強制轉數值 (關鍵修復！)
-        # 無論 AI 寫了什麼文字 (如 "未提供...")，一律強制轉為數字，轉不過的變成 NaN，再補成 1
+        # 2. 強制轉數值 (關鍵！把 "未提供" 變成 1)
         df['單元總節數'] = pd.to_numeric(df['單元總節數'], errors='coerce').fillna(1)
         
-        # 3. 計算每個單元的目標數量
+        # 3. 計算每個單元有幾條目標
         unit_counts = df['單元名稱'].value_counts()
         
-        # 4. 分配節數
+        # 4. 平均分配節數 (單元總節數 / 目標數)
         def distribute_hours(row):
             unit_name = row['單元名稱']
             total_unit_hours = row['單元總節數']
             count = unit_counts.get(unit_name, 1)
-            # 防止除以 0
             if count == 0: count = 1
             return total_unit_hours / count
 
         df['目標分配節數'] = df.apply(distribute_hours, axis=1)
 
-        # 5. 計算總時數與配分
+        # 5. 計算整份考卷的總權重 (避免重複加總)
+        # 我們只取每個單元的第一筆來加總「單元總節數」
         unit_hours_map = df[['單元名稱', '單元總節數']].drop_duplicates()
         total_course_hours = unit_hours_map['單元總節數'].sum()
         if total_course_hours == 0: total_course_hours = 1
 
+        # 6. 計算配分
         df['原始配分'] = (df['目標分配節數'] / total_course_hours) * 100
         df['預計配分'] = df['原始配分'].apply(lambda x: round(x, 1))
 
-        # 6. 微調總分至 100
+        # 7. 微調總分至 100 (修正小數點誤差)
         current_sum = df['預計配分'].sum()
         diff = 100 - current_sum
-        if abs(diff) > 0.01: # 只有誤差大於 0.01 才修正
+        if abs(diff) > 0.01: 
             df.iloc[-1, df.columns.get_loc('預計配分')] += diff
 
         return df
     except Exception as e:
-        # 如果真的發生錯誤，印出錯誤但不讓程式崩潰
         st.error(f"⚠️ 配分計算發生例外狀況 (已自動略過): {e}")
         return df
 
-# --- 4. Excel 下載 (修復 KeyError) ---
+# --- 4. Excel 下載 (修復版) ---
 def df_to_excel(df):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         export_df = df.copy()
         
-        # 定義期望的欄位順序
+        # 只匯出存在的欄位
         desired_cols = ['單元名稱', '單元總節數', '學習目標', '目標分配節數', '預計配分']
-        
-        # 關鍵修復：只選擇存在的欄位，避免 KeyError
         final_cols = [c for c in desired_cols if c in export_df.columns]
         export_df = export_df[final_cols]
         
@@ -135,7 +132,7 @@ def df_to_excel(df):
         cell_fmt = workbook.add_format({'text_wrap': True, 'valign': 'top', 'border': 1})
         num_fmt = workbook.add_format({'num_format': '0.0', 'border': 1, 'align': 'center'})
         
-        # 安全設定欄寬
+        # 設定欄寬
         worksheet.set_column('A:A', 15, cell_fmt) 
         worksheet.set_column('B:B', 10, num_fmt) 
         worksheet.set_column('C:C', 60, cell_fmt) 
@@ -157,19 +154,24 @@ def get_available_flash_model(api_key):
         return "models/gemini-1.5-flash"
     except: return "models/gemini-1.5-flash"
 
-# --- 6. Prompt 調整 (更穩定的輸出) ---
+# --- 6. Prompt (針對數字分點拆解的特化版) ---
 GEM_EXTRACT_PROMPT = """
 你是一個精準的教材分析師。請分析以下教材，提取「單元名稱」、「學習目標」與「單元總授課節數」。
 
-**輸出規則 (嚴格執行)：**
-1. **格式**：僅輸出 Markdown 表格，欄位：| 單元名稱 | 學習目標 | 授課節數 |
-2. **學習目標拆解**：
-   - 每一條重點必須獨立拆成 Excel 的一列 (Row)。
-   - **嚴禁合併**。
-3. **授課節數 (數字)**：
-   - 該欄位**必須填入純數字** (例如 5, 4, 2)。
-   - 如果教材沒寫節數，**請直接填入 "1"**，不要寫文字說明 (如 "未提供...")。
-   - 該單元的每一列都填入相同的總節數。
+**⚠️ 最高指令：數字拆解原則**
+1. **看到數字分點 (1., 2., 3...)，必須拆成不同列！**
+   - 如果單元內容有：「1. 知道... 2. 察覺... 3. 了解...」
+   - 請務必輸出 **3 列** 資料，每一列只放一個目標。
+   - **絕對禁止** 把 1, 2, 3 寫在同一格。
+
+**輸出格式規則：**
+1. 僅輸出一個 Markdown 表格。
+2. 欄位：| 單元名稱 | 學習目標 | 授課節數 |
+3. **單元名稱**：若該單元有 10 個目標，請在「單元名稱」欄位重複填寫 10 次該單元的名字。
+4. **授課節數**：
+   - 請填入該單元的「總節數」(數字)。
+   - 如果找不到，請填入 "1"。
+   - **不要** 寫文字，只能寫數字。
 
 教材內容：
 {content}
@@ -179,7 +181,7 @@ GEM_EXTRACT_PROMPT = """
 st.set_page_config(page_title="內湖國小出題系統 (Pro)", layout="wide")
 
 st.markdown("""<div style="background:#1E293B;padding:15px;text-align:center;color:white;border-radius:10px;">
-<h2>內湖國小 AI 命題系統 (細目拆解版)</h2></div>""", unsafe_allow_html=True)
+<h2>內湖國小 AI 命題系統 (目標拆解版)</h2></div>""", unsafe_allow_html=True)
 
 if "extracted_data" not in st.session_state: st.session_state.extracted_data = None
 if "step" not in st.session_state: st.session_state.step = 1
@@ -196,7 +198,7 @@ with st.sidebar:
     with st.expander("🛠️ 轉檔工具箱"):
         st.markdown("[Word 轉檔](https://cloudconvert.com/doc-to-docx)")
         st.markdown("[PPT 轉檔](https://cloudconvert.com/ppt-to-pptx)")
-        st.markdown("[PDF 轉文字 (OCR)](https://www.ilovepdf.com/zh-tw/pdf_to_word)")
+        st.markdown("[PDF 轉文字](https://www.ilovepdf.com/zh-tw/pdf_to_word)")
 
 if st.session_state.step == 1:
     uploaded_files = st.file_uploader("上傳教材", type=["pdf","docx","pptx","txt"], accept_multiple_files=True)
@@ -217,7 +219,6 @@ if st.session_state.step == 1:
                     
                     if data:
                         df = pd.DataFrame(data[1:], columns=["單元名稱", "學習目標", "授課節數"])
-                        # 欄位重新命名 (與 calculate_scores 對齊)
                         df.rename(columns={"授課節數": "單元總節數"}, inplace=True)
                         
                         df_cal = calculate_scores(df)
@@ -229,11 +230,10 @@ if st.session_state.step == 1:
                 except Exception as e: st.error(f"發生錯誤: {e}")
 
 elif st.session_state.step == 2:
-    st.info("💡 修正模式：若 AI 填寫的節數為 1 (預設值)，請手動修改「單元總節數」，配分會自動重算。")
+    st.info("💡 請檢查：如果 AI 抓的目標數正確，請在「單元總節數」輸入該單元的總課時 (如 5)，系統會自動分配權重。")
     
     df_curr = st.session_state.extracted_data
     
-    # 編輯器
     edited_df = st.data_editor(
         df_curr,
         column_config={
@@ -247,7 +247,6 @@ elif st.session_state.step == 2:
         num_rows="dynamic"
     )
     
-    # 即時重算
     if not edited_df.equals(df_curr):
         st.session_state.extracted_data = calculate_scores(edited_df)
         st.rerun()
