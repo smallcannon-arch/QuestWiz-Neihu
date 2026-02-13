@@ -9,7 +9,17 @@ import pandas as pd
 import subprocess
 import os
 
-# --- 1. 檔案讀取工具 ---
+# --- 1. 定義學科與題型映射 ---
+SUBJECT_Q_TYPES = {
+    "國語": ["國字注音", "造句", "單選題", "閱讀素養題", "句型變換", "簡答題"],
+    "數學": ["應用計算題", "圖表分析題", "填充題", "單選題", "是非題"],
+    "自然科學": ["實驗判讀題", "圖表分析題", "單選題", "是非題", "填充題", "配合題"],
+    "社會": ["地圖判讀題", "情境案例分析", "單選題", "是非題", "配合題", "簡答題"],
+    "英語": ["英語會話選擇", "詞彙搭配", "文意選填", "單選題", "閱讀理解"],
+    "": ["單選題", "是非題", "填充題", "簡答題"]
+}
+
+# --- 2. 檔案讀取工具 ---
 def read_pdf(file):
     pdf_reader = PdfReader(file)
     return "".join([p.extract_text() or "" for p in pdf_reader.pages])
@@ -27,7 +37,7 @@ def read_doc(file):
     finally:
         if os.path.exists("temp.doc"): os.remove("temp.doc")
 
-# --- 2. Markdown 表格轉 Excel 工具 ---
+# --- 3. Excel 下載工具 ---
 def md_to_excel(md_text):
     try:
         lines = [l for l in md_text.strip().split('\n') if l.startswith('|')]
@@ -41,50 +51,60 @@ def md_to_excel(md_text):
         return output.getvalue()
     except: return None
 
-# --- 3. 核心 Gem 命題鐵律 (含語言題型規範) ---
+# --- 4. 核心 Gem 命題鐵律 ---
 GEM_INSTRUCTIONS = """
 你是「國小專業定期評量命題 AI」。
-### 第一階段任務：
-1. **預先配分**：根據教材節數權重自動分配 100 分。 [cite: 2026-02-13]
-2. **題型約束**：嚴格遵守使用者勾選的題型(如：國字注音、造句等)。 [cite: 2026-02-13]
-3. **語文規範**：
-   - 產出「國字注音」時，需確保文字屬於該年級程度。
-   - 產出「造句」時，應提取教材中的重點詞彙。 [cite: 2026-02-13]
-
-### 第二階段任務：
-1. 產出【試題】。
-2. 產出【參考答案與解析】。 [cite: 2026-02-13]
+1. 嚴格執行兩段式輸出：Phase 1 審核表(含預先配分)，Phase 2 試卷與答案。
+2. 配分邏輯：根據教材節數權重分配 100 分。
+3. 嚴禁在此階段產出試題內容。
 """
 
-# --- 4. 網頁介面視覺設計 (深色質感版) ---
+# --- 5. 網頁介面視覺設計 (電腦橫向優化版) ---
 st.set_page_config(page_title="內湖國小 AI 輔助出題系統", layout="wide")
 
 st.markdown("""
     <style>
+    /* 全域背景 */
     .stApp { background-color: #0F172A; }
-    h1, h2, h3, p, span, label, .stMarkdown { color: #CBD5E1 !important; }
     
-    .school-header {
-        background-color: #1E293B;
-        padding: 25px;
-        border-radius: 15px;
-        text-align: center;
-        margin-bottom: 30px;
-        border: 1px solid #334155;
+    /* 調整主容器比例：寬螢幕時不宜過寬，保持閱讀舒適度 */
+    .block-container {
+        max-width: 1200px;
+        padding-top: 2rem;
+        padding-bottom: 5rem;
     }
-    .school-name { font-size: 24px; font-weight: 700; color: #94A3B8; letter-spacing: 2px; }
-    .app-title { font-size: 16px; color: #64748B; margin-top: 5px; }
 
+    /* 專業標題列 */
+    .school-header {
+        background: linear-gradient(90deg, #1E293B 0%, #334155 100%);
+        padding: 30px; border-radius: 20px; text-align: center; margin-bottom: 30px; 
+        border: 1px solid #475569;
+    }
+    .school-name { font-size: 28px; font-weight: 700; color: #F1F5F9; letter-spacing: 3px; }
+    .app-title { font-size: 16px; color: #94A3B8; margin-top: 8px; font-weight: 300; }
+
+    /* 文字顏色 */
+    h1, h2, h3, p, span, label, .stMarkdown { color: #E2E8F0 !important; }
+
+    /* 側邊欄引導卡片 */
+    .step-box {
+        background-color: #1E293B; padding: 12px; border-radius: 10px; 
+        margin-bottom: 12px; border-left: 5px solid #3B82F6; font-size: 14px;
+        color: #CBD5E1;
+    }
+
+    /* 版權文字 */
     .footer {
         position: fixed; left: 0; bottom: 0; width: 100%;
         background-color: #0F172A; color: #475569;
-        text-align: center; padding: 12px; font-size: 12px;
+        text-align: center; padding: 15px; font-size: 11px;
         border-top: 1px solid #1E293B; z-index: 100;
     }
     </style>
+    
     <div class="school-header">
         <div class="school-name">新竹市香山區內湖國小</div>
-        <div class="app-title">AI 輔助出題系統</div>
+        <div class="app-title">評量命題與審核自動化系統</div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -93,19 +113,21 @@ if "phase" not in st.session_state: st.session_state.phase = 1
 if "chat_history" not in st.session_state: st.session_state.chat_history = []
 if "chat_session" not in st.session_state: st.session_state.chat_session = None
 
-# --- Sidebar: API 與引導 ---
+# --- Sidebar: API 引導 (電腦版優化) ---
 with st.sidebar:
-    st.markdown("### 🔑 API 取得步驟")
-    st.markdown("""
-    1. 前往 [Google AI Studio](https://aistudio.google.com/) [cite: 2026-02-13]
-    2. 點擊 **"Get API key"** [cite: 2026-02-13]
-    3. 點擊 **"Create API key in new project"** [cite: 2026-02-13]
-    4. 複製並貼到下方欄位 [cite: 2026-02-13]
-    ---
-    """)
-    api_input = st.text_area("API Key (多組請用逗號隔開)", height=80)
+    st.markdown("### 🖥️ 快速開始指南")
+    steps = [
+        ("Step 1. 前往官網", "🔍 Google AI Studio"),
+        ("Step 2. 登入帳號", "👤 使用教育帳號"),
+        ("Step 3. 取得金鑰", "🆕 Get API key"),
+        ("Step 4. 貼上啟用", "📋 下方輸入框")
+    ]
+    for title, desc in steps:
+        st.markdown(f'<div class="step-box"><b>{title}</b><br>{desc}</div>', unsafe_allow_html=True)
+    
+    api_input = st.text_area("在此輸入 API Key", height=80, placeholder="支援多組，以逗號分隔")
     st.divider()
-    if st.button("🔄 重置命題進度"):
+    if st.button("🔄 重置系統進度"):
         st.session_state.phase = 1
         st.session_state.chat_history = []
         st.rerun()
@@ -113,27 +135,31 @@ with st.sidebar:
 # --- Phase 1: 規劃審核表 ---
 if st.session_state.phase == 1:
     with st.container(border=True):
-        st.markdown("### 📋 第一階段：規劃審核表")
+        st.markdown("### 📍 第一階段：參數設定與配分規劃")
         c1, c2, c3 = st.columns(3)
-        with c1: grade = st.selectbox("請選擇年級", ["", "一年級", "二年級", "三年級", "四年級", "五年級", "六年級"], index=0)
-        with c2: subject = st.selectbox("請選擇科目", ["", "國語", "數學", "社會", "自然科學", "英語"], index=0)
-        with c3: mode = st.selectbox("命題模式", ["🟢 模式 A：適中", "🔴 模式 B：困難", "🌟 模式 C：素養"], index=0)
+        with c1: grade = st.selectbox("1. 選擇年級", ["", "一年級", "二年級", "三年級", "四年級", "五年級", "六年級"], index=0)
+        with c2: subject = st.selectbox("2. 選擇科目", ["", "國語", "數學", "自然科學", "社會", "英語"], index=0)
+        with c3: mode = st.selectbox("3. 命題模式", ["🟢 模式 A：適中", "🔴 模式 B：困難", "🌟 模式 C：素養"], index=0)
         
-        # 擴展題型建議清單
-        q_types = st.multiselect(
-            "欲產出的題型 (可多選)", 
-            ["國字注音", "造句", "單選題", "是非題", "填充題", "配合題", "簡答題", "實驗判讀題", "閱讀素養題", "應用計算題", "圖表分析題"], 
-            default=["國字注音", "造句", "單選題"]
-        )
+        st.divider()
+        st.markdown("**4. 勾選欲產出的題型**")
+        available_types = SUBJECT_Q_TYPES.get(subject, SUBJECT_Q_TYPES[""])
+        cols = st.columns(min(len(available_types), 4)) # 動態橫向排列核取方塊
+        selected_types = []
+        for i, t in enumerate(available_types):
+            if cols[i % len(cols)].checkbox(t, value=True):
+                selected_types.append(t)
         
-        uploaded_files = st.file_uploader("上傳教材檔案", type=["pdf", "docx", "doc"], accept_multiple_files=True)
+        st.divider()
+        uploaded_files = st.file_uploader("5. 上傳教材檔案 (支援 PDF/Word)", type=["pdf", "docx", "doc"], accept_multiple_files=True)
         
-        if st.button("🚀 產出試題審核表 (含預先配分)", type="primary", use_container_width=True):
-            if not grade or not subject or not api_input or not uploaded_files or not q_types:
-                st.error("⚠️ 請完整填寫年級、科目、題型並上傳教材。")
+        if st.button("🚀 產出試題審核表 (含比例配分)", type="primary", use_container_width=True):
+            if not grade or not subject or not api_input or not uploaded_files or not selected_types:
+                st.error("⚠️ 欄位未完整：請確認年級、科目、題型均已設定。")
             else:
                 keys = [k.strip() for k in api_input.replace('\n', ',').split(',') if k.strip()]
                 genai.configure(api_key=random.choice(keys))
+                
                 content = ""
                 for f in uploaded_files:
                     ext = f.name.split('.')[-1].lower()
@@ -146,36 +172,36 @@ if st.session_state.phase == 1:
                     target = "models/gemini-2.5-flash" if "models/gemini-2.5-flash" in available else available[0]
                     model = genai.GenerativeModel(model_name=target, system_instruction=GEM_INSTRUCTIONS, generation_config={"temperature": 0.0})
                     chat = model.start_chat(history=[])
-                    with st.spinner("⚡ 正在分析教材目標並精算配分..."):
-                        t_str = "、".join(q_types)
-                        res = chat.send_message(f"年級：{grade}, 科目：{subject}, 模式：{mode}\n指定題型：{t_str}\n教材：{content}\n--- 請直接產出審核表表格。")
+                    with st.spinner("⚡ 分析中...正在計算教材節數權重"):
+                        t_str = "、".join(selected_types)
+                        res = chat.send_message(f"年級：{grade}, 科目：{subject}, 模式：{mode}\n勾選題型：{t_str}\n教材：{content}\n--- 請產出審核表表格。")
                         st.session_state.chat_session = chat
                         st.session_state.chat_history.append({"role": "model", "content": res.text})
                         st.session_state.phase = 2
                         st.rerun()
-                except Exception as e: st.error(f"錯誤：{e}")
+                except Exception as e: st.error(f"API 連線異常：{e}")
 
-# --- Phase 2: 出題 ---
+# --- Phase 2: 確認與出題 ---
 elif st.session_state.phase == 2:
     current_md = st.session_state.chat_history[0]["content"]
     with st.chat_message("ai"):
         st.markdown(current_md)
         excel_data = md_to_excel(current_md)
         if excel_data:
-            st.download_button(label="📥 下載此審核表 (Excel)", data=excel_data, file_name=f"內湖國小_{subject}_審核表.xlsx")
+            st.download_button(label="📥 匯出此審核表 (Excel 格式)", data=excel_data, file_name=f"內湖國小_{subject}_審核表.xlsx", use_container_width=True)
 
     st.divider()
     with st.container(border=True):
-        st.markdown("### 📝 第二階段：正式產出試卷")
+        st.markdown("### 📝 第二階段：試卷正式生成")
         cb1, cb2 = st.columns(2)
         with cb1:
-            if st.button("✅ 審核表確認無誤，開始出題", type="primary", use_container_width=True):
-                with st.spinner("⚡ 正在依照審核表產生試題與參考答案卷..."):
-                    res = st.session_state.chat_session.send_message("確認無誤，請依照此表產出【試題】與【參考答案卷】。")
+            if st.button("✅ 審核表確認，產出試卷與答案", type="primary", use_container_width=True):
+                with st.spinner("⚡ 命題中...請耐心等候完整產出"):
+                    res = st.session_state.chat_session.send_message("確認無誤，請依照此表產出【正式試題】與【參考答案卷】。")
                     st.session_state.chat_history.append({"role": "model", "content": res.text})
                     st.rerun()
         with cb2:
-            if st.button("⬅️ 返回修改模式", use_container_width=True):
+            if st.button("⬅️ 返回修改目標", use_container_width=True):
                 st.session_state.phase = 1
                 st.session_state.chat_history = []
                 st.rerun()
@@ -183,10 +209,9 @@ elif st.session_state.phase == 2:
     if len(st.session_state.chat_history) > 1:
         for msg in st.session_state.chat_history[1:]:
             with st.chat_message("ai"): st.markdown(msg["content"])
-        if prompt := st.chat_input("微調試題或答案？"):
+        if prompt := st.chat_input("微調試題細節？"):
             res = st.session_state.chat_session.send_message(prompt)
             st.session_state.chat_history.append({"role": "model", "content": res.text})
             st.rerun()
 
-# 版權宣告 Footer
-st.markdown('<div class="footer">Copyright © 2026 新竹市香山區內湖國小. All Rights Reserved.</div>', unsafe_allow_html=True)
+st.markdown('<div class="footer">© 2026 新竹市香山區內湖國小. All Rights Reserved.</div>', unsafe_allow_html=True)
