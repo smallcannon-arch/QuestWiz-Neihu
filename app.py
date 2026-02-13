@@ -1,3 +1,25 @@
+import subprocess
+import sys
+import os
+
+# --- 0. 自動安裝依賴套件 (Auto-Install) ---
+# 這段程式碼會自動檢查並安裝 xlsxwriter，防止下載失敗
+def install_package(package):
+    try:
+        __import__(package)
+    except ImportError:
+        print(f"正在安裝 {package}...")
+        subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+
+# 檢查清單：如果要用其他套件也可以加在這裡
+install_package("xlsxwriter")
+install_package("pypdf")
+install_package("docx")
+install_package("pandas")
+install_package("google.generativeai")
+
+# -------------------------------------------
+
 import streamlit as st
 import google.generativeai as genai
 import random
@@ -6,8 +28,6 @@ import time
 from pypdf import PdfReader
 from docx import Document
 import pandas as pd
-import subprocess
-import os
 import re
 
 # --- 1. 定義學科與題型映射 ---
@@ -106,6 +126,7 @@ def md_to_excel(md_text):
         
         # Step 5: 使用 XlsxWriter 引擎進行美化
         output = io.BytesIO()
+        # 這裡需要用到 xlsxwriter，上面已經自動安裝了
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
             df.to_excel(writer, index=False, sheet_name='學習目標審核表')
             workbook = writer.book
