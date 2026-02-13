@@ -1,5 +1,8 @@
 streamlit
 google-generativeai
+pandas
 pypdf
 python-docx
-pandas
+python-pptx
+xlsxwriter
+openpyxl
