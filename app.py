@@ -42,72 +42,89 @@ def extract_text_from_files(files):
             text_content += f"\n[讀取錯誤: {file.name}]"
     return text_content
 
-# --- 3. Excel 下載工具 (強力容錯版) --- [cite: 2026-02-13]
+# --- 3. Excel 下載工具 (錨點定位暴力版) ---
 def md_to_excel(md_text):
     try:
-        # 1. 抓取所有含有 | 的行，並過濾掉 Markdown 分隔線 (---|---)
-        lines = [
-            l.strip() 
-            for l in md_text.strip().split('\n') 
-            if '|' in l and '---' not in l and l.strip()
-        ]
+        lines = md_text.strip().split('\n')
+        table_lines = []
+        is_table_started = False
         
-        if len(lines) < 2: return None # 資料太少，無法構成表格
-        
-        # 2. 處理標題列 (第一行)
-        # 去頭去尾的 |，然後分割
-        headers = [h.strip() for h in lines[0].strip('|').split('|')]
-        
-        # 3. 處理數據列
-        data = []
-        for line in lines[1:]:
-            row = [cell.strip() for cell in line.strip('|').split('|')]
-            data.append(row)
+        # 1. 錨點搜尋：尋找含有 "單元名稱" 且含有 "|" 的行作為開頭
+        for line in lines:
+            if "單元名稱" in line and "|" in line:
+                is_table_started = True
+                table_lines.append(line) # 加入標題行
+                continue
             
-        # 4. 強力補齊機制 (解決欄位對不齊的問題)
-        max_cols = len(headers)
-        cleaned_data = []
-        for row in data:
-            # 如果這一行欄位太多，切掉多餘的
-            if len(row) > max_cols:
-                cleaned_data.append(row[:max_cols])
-            # 如果這一行欄位太少，補空值
-            elif len(row) < max_cols:
-                cleaned_data.append(row + [''] * (max_cols - len(row)))
-            else:
-                cleaned_data.append(row)
+            if is_table_started:
+                # 如果遇到分隔線 (---)，跳過
+                if "---" in line: continue
+                # 如果這行有 "|"，視為資料行
+                if "|" in line:
+                    table_lines.append(line)
+                # 如果連續出現空行或沒有 "|" 的文字，可能表格結束了，但為了保險起見，我們繼續抓
                 
-        # 5. 轉成 DataFrame
-        df = pd.DataFrame(cleaned_data, columns=headers)
+        if not table_lines: return None
+
+        # 2. 解析資料
+        data = []
+        for line in table_lines:
+            # 切割並去除頭尾空白
+            row = [cell.strip() for cell in line.split('|')]
+            
+            # 修正：如果因為頭尾有 | 導致切出空字串，將其移除
+            # 例如 "| A | B |" split 會變成 ['', 'A', 'B', '']
+            if len(row) > 0 and row[0] == '': row.pop(0)
+            if len(row) > 0 and row[-1] == '': row.pop()
+            
+            data.append(row)
+
+        if len(data) < 2: return None # 只有標題沒內容
+
+        headers = data[0]
+        rows = data[1:]
         
-        # 6. 輸出 Excel
+        # 3. 強力補齊與切削
+        max_cols = len(headers)
+        cleaned_rows = []
+        for r in rows:
+            # 確保每一列長度跟標題一樣
+            if len(r) == max_cols:
+                cleaned_rows.append(r)
+            elif len(r) < max_cols:
+                # 少了就補空值
+                cleaned_rows.append(r + [''] * (max_cols - len(r)))
+            else:
+                # 多了就切掉 (通常是註解)
+                cleaned_rows.append(r[:max_cols])
+
+        df = pd.DataFrame(cleaned_rows, columns=headers)
+        
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
             df.to_excel(writer, index=False, sheet_name='學習目標審核表')
-            
-            # 自動調整欄寬 (簡單版)
+            # 調整欄寬
             worksheet = writer.sheets['學習目標審核表']
             for i, col in enumerate(df.columns):
-                worksheet.set_column(i, i, 20) # 預設寬度 20
+                worksheet.set_column(i, i, 25)
                 
         return output.getvalue()
     except Exception as e:
-        print(f"Excel 轉換失敗: {e}") # Debug 用
+        print(f"Excel 建置失敗: {e}")
         return None
 
 # --- 4. 核心 Gem 命題鐵律 ---
 GEM_INSTRUCTIONS = """
 你是「國小專業定期評量命題 AI」。
 
-### ⚠️ 最高指導原則：
-1. **Phase 1 (現在)**：
-   - 僅產出【學習目標審核表】。
-   - **必須使用標準 Markdown 表格格式**。
-   - 禁止使用程式碼區塊符號 (```)。
-   - **絕對禁止**在此階段產出任何試題。
-   - 表格欄位：| 單元名稱 | 學習目標(原文) | 對應題型 | 預計配分 |
-2. **Phase 2 (之後)**：才依照審核表產出試題。
-3. **科目防呆**：若教材與科目不符，僅回覆『ERROR_SUBJECT_MISMATCH』。
+### ⚠️ Phase 1 嚴格指令：
+1. **任務**：僅產出【學習目標審核表】。
+2. **禁止**：嚴禁產出試題、題目、答案或任何前言後語。
+3. **格式**：必須使用標準 Markdown 表格。
+   - 第一行為標題：| 單元名稱 | 學習目標(原文) | 對應題型 | 預計配分 |
+   - 第二行為分隔：|---|---|---|---|
+   - 每一列資料必須獨立換行。
+4. **內容**：若教材與科目不符，僅回覆『ERROR_SUBJECT_MISMATCH』。
 """
 
 # --- 5. 智能模型選擇與重試機制 ---
@@ -293,7 +310,6 @@ if st.session_state.phase == 1:
                                 message_placeholder = st.empty()
                                 full_response = ""
                                 t_str = "、".join(selected_types)
-                                # Prompt 強制對齊 [cite: 2026-02-13]
                                 prompt_content = f"""
                                 任務：Phase 1 學習目標提取
                                 年級：{grade}, 科目：{subject}
@@ -305,8 +321,8 @@ if st.session_state.phase == 1:
                                 
                                 **格式嚴格要求：**
                                 1. 請直接輸出 Markdown 表格，不要包含 ```markdown 或 ``` 符號。
-                                2. 請不要寫任何開場白或結尾。
-                                3. 表格欄位必須包含：| 單元名稱 | 學習目標(原文) | 對應題型 | 預計配分 |
+                                2. 表格標題行必須包含：| 單元名稱 | 學習目標(原文) | 對應題型 | 預計配分 |
+                                3. 確保每一列資料都有 | 分隔，並換行。
                                 """
                                 st.session_state.last_prompt_content = prompt_content
                                 
@@ -333,16 +349,15 @@ elif st.session_state.phase == 2:
     with st.container(border=True):
         st.markdown("### 📥 第二階段：下載審核表")
         
-        # 顯示 AI 回覆 
         with st.chat_message("ai"): st.markdown(current_md)
         
-        # 嘗試轉換 Excel
         excel_data = md_to_excel(current_md)
         if excel_data:
             st.download_button(label="📥 匯出此審核表 (Excel)", data=excel_data, file_name=f"內湖國小_{subject}_審核表.xlsx", use_container_width=True)
         else:
-            # 容錯提示
-            st.warning("⚠️ 偵測到 AI 輸出的表格格式可能不完整，但您仍可繼續進行出題。")
+            st.warning("⚠️ 偵測到表格格式可能不完整，請查看下方原始資料。")
+            with st.expander("🔍 查看 AI 原始輸出 (Debug)"):
+                st.text(current_md)
 
     st.divider()
     with st.container(border=True):
