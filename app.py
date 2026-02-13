@@ -55,7 +55,7 @@ def md_to_excel(md_text):
 GEM_INSTRUCTIONS = """
 你是「國小專業定期評量命題 AI」。
 1. **科目守門員**：若教材與科目明顯不符，僅回覆：『ERROR_SUBJECT_MISMATCH』。
-2. **目標對應**：學習目標必須原文採自教材。每一條目標在整份試卷中至少出現一次即可。
+2. **目標對應**：學習目標必須原文採自教材。每一條目標在整份試卷中至少出現一次。
 3. **分階段輸出**：Phase 1 審核表，Phase 2 試卷與答案。
 """
 
@@ -66,15 +66,17 @@ st.markdown("""
     <style>
     .stApp { background-color: #0F172A; }
     .block-container { max-width: 1200px; padding-top: 2rem; padding-bottom: 5rem; }
+    
     .school-header {
         background: linear-gradient(90deg, #1E293B 0%, #334155 100%);
-        padding: 30px; border-radius: 20px; text-align: center; margin-bottom: 30px; border: 1px solid #475569;
+        padding: 30px; border-radius: 20px; text-align: center; margin-bottom: 30px; 
+        border: 1px solid #475569;
     }
     .school-name { font-size: 28px; font-weight: 700; color: #F1F5F9; letter-spacing: 3px; }
     .app-title { font-size: 16px; color: #94A3B8; margin-top: 8px; }
     h1, h2, h3, p, span, label, .stMarkdown { color: #E2E8F0 !important; }
     
-    /* 恢復詳細版說明的卡片樣式 */
+    /* 詳細版卡片樣式 */
     .step-box {
         background-color: #1E293B; padding: 12px; border-radius: 10px; 
         margin-bottom: 12px; border-left: 5px solid #3B82F6; font-size: 13px;
@@ -83,7 +85,7 @@ st.markdown("""
     .step-box a { color: #60A5FA !important; text-decoration: none; font-weight: bold; }
     .step-box a:hover { text-decoration: underline; }
     
-    /* 置中按鈕 */
+    /* 側邊欄按鈕強制置中 */
     [data-testid="stSidebar"] .stButton > button { display: block; margin: 0 auto !important; }
     
     .footer { position: fixed; left: 0; bottom: 0; width: 100%; background-color: #0F172A; color: #475569; text-align: center; padding: 15px; font-size: 11px; border-top: 1px solid #1E293B; z-index: 100; }
@@ -100,7 +102,7 @@ if "phase" not in st.session_state: st.session_state.phase = 1
 if "chat_history" not in st.session_state: st.session_state.chat_history = []
 if "chat_session" not in st.session_state: st.session_state.chat_session = None
 
-# --- Sidebar: 恢復詳細引導 ---
+# --- Sidebar: 詳細引導 ---
 with st.sidebar:
     st.markdown("### 🖥️ 快速開始指南")
     st.markdown("""
@@ -126,15 +128,18 @@ with st.sidebar:
     
     st.divider()
     
+    # --- 資源區塊 (修正連結) ---
     st.markdown("### 📂 資源快速連結")
     st.markdown("""
     <div class="step-box">
         <b>📖 教材資源下載</b><br>
-        - <a href="https://webetextbook.knsh.com.tw/" target="_blank">康軒</a> | <a href="https://webetextbook.hle.com.tw/" target="_blank">翰林</a> | <a href="https://www.nani.com.tw/" target="_blank">南一</a>
+        - <a href="https://webetextbook.knsh.com.tw/" target="_blank">康軒電子書</a><br>
+        - <a href="https://edisc3.hle.com.tw/" target="_blank">翰林行動大師 (新)</a><br>
+        - <a href="https://reader.nani.com.tw/" target="_blank">南一 OneBox</a>
     </div>
     <div class="step-box">
         <b>🏛️ 官方參考資料</b><br>
-        - <a href="https://www.naer.edu.tw/PageSyllabus?nodeid=188" target="_blank">108 課綱領綱</a><br>
+        - <a href="https://cirn.moe.edu.tw/Syllabus/index.aspx?sid=1108" target="_blank">108 課綱資源網 (CIRN)</a><br>
         - <a href="https://www.nhps.hc.edu.tw/" target="_blank">內湖國小校網</a>
     </div>
     """, unsafe_allow_html=True)
@@ -191,7 +196,7 @@ if st.session_state.phase == 1:
                         t_str = "、".join(selected_types)
                         res = chat.send_message(f"年級：{grade}, 科目：{subject}\n題型：{t_str}\n教材：{content}")
                         if "ERROR_SUBJECT_MISMATCH" in res.text:
-                            st.error(f"❌ 防呆啟動：教材與『{subject}』不符。")
+                            st.error(f"❌ 防呆啟動：教材與『{subject}』不符，請重新確認。") [cite: 2026-02-13]
                         else:
                             st.session_state.chat_session = chat
                             st.session_state.chat_history.append({"role": "model", "content": res.text})
