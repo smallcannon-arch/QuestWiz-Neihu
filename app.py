@@ -30,83 +30,100 @@ def read_doc(file):
 # --- 2. Markdown 表格轉 Excel 工具 ---
 def md_to_excel(md_text):
     try:
-        # 尋找 Markdown 表格
-        tables = re.findall(r'\|(.+)\|', md_text)
-        if not tables: return None
-        
-        # 簡單解析 Markdown 表格轉為 DataFrame
-        lines = md_text.strip().split('\n')
-        table_lines = [l for l in lines if l.startswith('|')]
-        if len(table_lines) < 3: return None
-        
-        # 處理標題與資料
-        headers = [c.strip() for c in table_lines[0].split('|') if c.strip()]
-        data = []
-        for l in table_lines[2:]: # 跳過標題與分隔線
-            row = [c.strip() for c in l.split('|') if c.strip()]
-            if len(row) == len(headers): data.append(row)
-        
+        lines = [l for l in md_text.strip().split('\n') if l.startswith('|')]
+        if len(lines) < 3: return None
+        headers = [c.strip() for c in lines[0].split('|') if c.strip()]
+        data = [[c.strip() for c in l.split('|') if c.strip()] for l in lines[2:]]
         df = pd.DataFrame(data, columns=headers)
-        
-        # 轉換為 Excel Byte 流
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
             df.to_excel(writer, index=False, sheet_name='試題審核表')
         return output.getvalue()
-    except:
-        return None
+    except: return None
 
-# --- 3. 核心 Gem 命題鐵律 ---
+# --- 3. 核心 Gem 命題鐵律 (嚴格限制輸出階段) ---
 GEM_INSTRUCTIONS = """
 你是「國小專業定期評量命題 AI」。
-### 命題鐵律：
-1. **兩段式輸出**：Phase 1 給審核表，Phase 2 給題目與答案。
-2. **目標覆蓋**：每一條學習目標必須原文提取並對應到具體題號。
-3. **自動產出答案**：在試題結尾，務必產出【參考答案與解析】，包含正確選項與解題要點。
-4. **配分校正**：總分固定 100 分，總格數 34-45 格。
+### ⚠️ 輸出控制鐵律 (非常重要)：
+1. **Phase 1 (當前階段)**：僅允許產出【試題審核表】表格。禁止產出任何具體的考試題目。 [cite: 2026-02-13]
+2. **Phase 2 (待命階段)**：只有當使用者明確輸入『開始出題』後，才可產出試題與【參考答案與解析】。 [cite: 2026-02-13]
+3. **目標對應**：學習目標必須原文提取並掛鉤題號。
+4. **配分精算**：總分固定 100 分。
 """
 
-# --- 4. 網頁介面配置 ---
+# --- 4. 網頁介面視覺設計 (美化版) ---
 st.set_page_config(page_title="內湖國小 AI 輔助出題系統", layout="wide")
 
 st.markdown("""
     <style>
-    .school-name { font-size: 24px; color: #1E3A8A; font-weight: bold; margin-bottom: 0px; }
-    .app-title { font-size: 18px; color: #4B5563; margin-top: 0px; margin-bottom: 10px; }
+    /* 全域字體與背景 */
+    @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;700&display=swap');
+    html, body, [class*="st-"] { font-family: 'Noto Sans TC', sans-serif; background-color: #F1F5F9; }
+    
+    /* 專業深藍標題列 */
+    .school-header {
+        background: linear-gradient(135deg, #1E3A8A 0%, #3B82F6 100%);
+        padding: 30px;
+        border-radius: 20px;
+        color: white;
+        text-align: center;
+        margin-bottom: 30px;
+        box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
+    }
+    .school-name { font-size: 28px; font-weight: 700; letter-spacing: 3px; }
+    .app-title { font-size: 18px; font-weight: 300; opacity: 0.9; margin-top: 8px; }
+    
+    /* 卡片設計 */
+    .st-emotion-cache-12w0qpk { 
+        background-color: white !important; 
+        border-radius: 15px !important;
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05) !important;
+        padding: 25px !important;
+    }
     </style>
-    <div class="school-name">新竹市香山區內湖國小</div>
-    <div class="app-title">AI 輔助出題系統</div>
-    <hr style='margin-top: 0; margin-bottom: 20px;'>
+    
+    <div class="school-header">
+        <div class="school-name">新竹市香山區內湖國小</div>
+        <div class="app-title">AI 輔助出題系統</div>
+    </div>
     """, unsafe_allow_html=True)
 
+# 初始化進度
 if "phase" not in st.session_state: st.session_state.phase = 1 
 if "chat_history" not in st.session_state: st.session_state.chat_history = []
 if "chat_session" not in st.session_state: st.session_state.chat_session = None
+if "show_exam" not in st.session_state: st.session_state.show_exam = False
 
+# --- Sidebar ---
 with st.sidebar:
-    st.header("🔑 系統設定")
-    api_input = st.text_area("貼上 API Key (多組請用逗號隔開)", height=100)
+    st.subheader("🔑 系統金鑰設定")
+    api_input = st.text_area("多組 Key 請用逗號隔開", height=100)
     st.divider()
-    if st.button("🔄 重設系統"):
+    if st.button("🔄 重置命題進度"):
         st.session_state.phase = 1
         st.session_state.chat_history = []
-        st.session_state.chat_session = None
+        st.session_state.show_exam = False
         st.rerun()
 
-# --- Phase 1 ---
+# --- Phase 1: 上傳與分析 ---
 if st.session_state.phase == 1:
     with st.container(border=True):
-        st.subheader("第一步：上傳教材規劃審核表")
+        st.markdown("### 📋 第一階段：規劃審核表")
         c1, c2, c3 = st.columns(3)
-        with c1: grade = st.selectbox("年級", ["一年級", "二年級", "三年級", "四年級", "五年級", "六年級"], index=4)
-        with c2: subject = st.selectbox("科目", ["自然科學", "國語", "數學", "社會"], index=0)
-        with c3: mode = st.selectbox("命題模式", ["🟢 模式 A：適中", "🔴 模式 B：困難", "🌟 模式 C：素養"], index=0)
-        uploaded_files = st.file_uploader("上傳教材", type=["pdf", "docx", "doc"], accept_multiple_files=True)
+        # 預設空白 (index=0 為 "")
+        with c1: grade = st.selectbox("請選擇年級", ["", "一年級", "二年級", "三年級", "四年級", "五年級", "六年級"], index=0)
+        with c2: subject = st.selectbox("請選擇科目", ["", "自然科學", "國語", "數學", "社會", "英語"], index=0)
+        with c3: mode = st.selectbox("請選擇命題模式", ["🟢 模式 A：適中", "🔴 模式 B：困難", "🌟 模式 C：素養"], index=0)
+        
+        uploaded_files = st.file_uploader("請上傳教材檔案 (PDF/Word)", type=["pdf", "docx", "doc"], accept_multiple_files=True)
         
         if st.button("🚀 產出試題審核表", type="primary", use_container_width=True):
-            if api_input and uploaded_files:
+            if not grade or not subject or not api_input or not uploaded_files:
+                st.error("⚠️ 提醒：請先選擇年級、科目並上傳教材。")
+            else:
                 keys = [k.strip() for k in api_input.replace('\n', ',').split(',') if k.strip()]
                 genai.configure(api_key=random.choice(keys))
+                
                 content = ""
                 for f in uploaded_files:
                     ext = f.name.split('.')[-1].lower()
@@ -119,46 +136,54 @@ if st.session_state.phase == 1:
                     target = "models/gemini-2.5-flash" if "models/gemini-2.5-flash" in available else available[0]
                     model = genai.GenerativeModel(model_name=target, system_instruction=GEM_INSTRUCTIONS, generation_config={"temperature": 0.0})
                     chat = model.start_chat(history=[])
-                    with st.spinner("⚡ 正在分析教材..."):
-                        res = chat.send_message(f"年級：{grade}, 科目：{subject}, 模式：{mode}\n教材：{content}\n--- 請產出【試題審核表】。")
+                    
+                    with st.spinner("⚡ 正在嚴格計算配分並產出審核表..."):
+                        # 特別強調：此階段禁止出題
+                        res = chat.send_message(f"年級：{grade}, 科目：{subject}, 模式：{mode}\n教材：{content}\n--- 請產出【試題審核表】。注意：嚴禁在此階段產出試題內容。")
                         st.session_state.chat_session = chat
                         st.session_state.chat_history.append({"role": "model", "content": res.text})
                         st.session_state.phase = 2
                         st.rerun()
-                except Exception as e: st.error(f"錯誤：{e}")
+                except Exception as e: st.error(f"連線失敗：{e}")
 
-# --- Phase 2 ---
+# --- Phase 2: 確認與出題 ---
 elif st.session_state.phase == 2:
+    # 僅顯示審核表 (chat_history 的第一項)
     current_md = st.session_state.chat_history[0]["content"]
     with st.chat_message("ai"):
         st.markdown(current_md)
-        # --- 下載 Excel 功能 ---
         excel_data = md_to_excel(current_md)
         if excel_data:
-            st.download_button(label="📥 下載此審核表 (Excel)", data=excel_data, file_name="內湖國小試題審核表.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            st.download_button("📥 下載此審核表 (Excel)", data=excel_data, file_name=f"內湖國小_{subject}_審核表.xlsx")
 
     st.divider()
-    with st.container(border=True):
-        st.subheader("第二步：產出試題與答案")
-        c_btn1, c_btn2 = st.columns(2)
-        with c_btn1:
-            if st.button("✅ 開始出題 (含參考答案)", type="primary", use_container_width=True):
-                with st.spinner("⚡ 正在依照審核表命題中..."):
-                    res = st.session_state.chat_session.send_message("審核表確認無誤，請開始出題並在最後附上【參考答案與解析】。")
-                    st.session_state.chat_history.append({"role": "model", "content": res.text})
+    
+    # 只有尚未開始出題時，才顯示「確認出題」按鈕
+    if not st.session_state.show_exam:
+        with st.container(border=True):
+            st.markdown("### 📝 第二階段：確認無誤後開始命題")
+            cb1, cb2 = st.columns(2)
+            with cb1:
+                if st.button("✅ 審核表確認無誤，開始出題", type="primary", use_container_width=True):
+                    st.session_state.show_exam = True # 開啟出題門檻
+                    with st.spinner("⚡ 正在依照審核表產生試題與參考答案..."):
+                        res = st.session_state.chat_session.send_message("審核表確認無誤，請開始產出【試題】與【參考答案卷】。")
+                        st.session_state.chat_history.append({"role": "model", "content": res.text})
+                        st.rerun()
+            with cb2:
+                if st.button("⬅️ 返回修改參數", use_container_width=True):
+                    st.session_state.phase = 1
+                    st.session_state.chat_history = []
+                    st.session_state.show_exam = False
                     st.rerun()
-        with c_btn2:
-            if st.button("⬅️ 返回修改", use_container_width=True):
-                st.session_state.phase = 1
-                st.session_state.chat_history = []
-                st.rerun()
-
-    # 顯示後續產出的題目與答案
-    if len(st.session_state.chat_history) > 1:
+    
+    # 若已開啟出題，則顯示後續內容
+    if st.session_state.show_exam:
         for msg in st.session_state.chat_history[1:]:
-            with st.chat_message("ai"): st.markdown(msg["content"])
-
-    if prompt := st.chat_input("需要修改題目或調整答案嗎？"):
-        res = st.session_state.chat_session.send_message(prompt)
-        st.session_state.chat_history.append({"role": "model", "content": res.text})
-        st.rerun()
+            with st.chat_message("ai"):
+                st.markdown(msg["content"])
+        
+        if prompt := st.chat_input("需要對題目或答案進行微調嗎？"):
+            res = st.session_state.chat_session.send_message(prompt)
+            st.session_state.chat_history.append({"role": "model", "content": res.text})
+            st.rerun()
