@@ -19,8 +19,7 @@ SUBJECT_Q_TYPES = {
     "": ["單選題", "是非題", "填充題", "簡答題"]
 }
 
-# --- 2. 檔案讀取工具 (加入快取優化 🚀) ---
-# 透過 @st.cache_data，讓程式記住讀過的檔案，不用每次都重讀
+# --- 2. 檔案讀取工具 (快取優化) ---
 @st.cache_data
 def extract_text_from_files(files):
     text_content = ""
@@ -34,7 +33,6 @@ def extract_text_from_files(files):
                 doc = Document(file)
                 text_content += "\n".join([p.text for p in doc.paragraphs])
             elif ext == 'doc':
-                # .doc 處理較複雜，通常不快取或需特殊處理，這裡維持原樣
                 with open("temp.doc", "wb") as f: f.write(file.getbuffer())
                 result = subprocess.run(['antiword', 'temp.doc'], capture_output=True, text=True)
                 if result.returncode == 0:
@@ -58,15 +56,20 @@ def md_to_excel(md_text):
         return output.getvalue()
     except: return None
 
-# --- 4. 核心 Gem 命題鐵律 (優化指令：減少廢話) ---
+# --- 4. 核心 Gem 命題鐵律 (強化禁制令) ---
 GEM_INSTRUCTIONS = """
 你是「國小專業定期評量命題 AI」。
-1. **科目守門員**：若教材與科目明顯不符，僅回覆：『ERROR_SUBJECT_MISMATCH』。
-2. **目標對應**：學習目標必須原文採自教材。每一條目標在整份試卷中至少出現一次。
-3. **直接輸出**：請直接產出表格或試題，不要有任何開場白（如「好的，這是...」）或結尾語，以節省生成時間。
+
+### ⚠️ 最高指導原則：
+1. **Phase 1 (現在)**：
+   - 僅產出【學習目標審核表】表格。
+   - **絕對禁止**在此階段產出任何試題、題目或答案。
+   - 表格欄位需包含：單元名稱、學習目標(原文)、對應題型、預計配分。
+2. **Phase 2 (之後)**：才依照審核表產出試題。
+3. **科目防呆**：若教材與科目不符，僅回覆『ERROR_SUBJECT_MISMATCH』。
 """
 
-# --- 5. 智能模型選擇器 ---
+# --- 5. 智能模型選擇與重試機制 (解決 429 Error) ---
 def get_best_model(api_key, mode="fast"):
     genai.configure(api_key=api_key)
     try:
@@ -76,9 +79,7 @@ def get_best_model(api_key, mode="fast"):
         if mode == "fast":
             for m in models:
                 if 'flash' in m.lower(): target_model = m; break
-            if not target_model:
-                for m in models:
-                    if 'gemini-pro' in m.lower() and 'vision' not in m.lower(): target_model = m; break
+            if not target_model: target_model = models[0] # Fallback
         elif mode == "smart":
             for m in models:
                 if 'pro' in m.lower() and '1.5' in m.lower(): target_model = m; break
@@ -88,6 +89,21 @@ def get_best_model(api_key, mode="fast"):
         if not target_model: target_model = models[0]
         return target_model, None
     except Exception as e: return None, str(e)
+
+# 自動重試函數
+def generate_with_retry(model, prompt, stream=True):
+    max_retries = 3
+    for i in range(max_retries):
+        try:
+            return model.generate_content(prompt, stream=stream)
+        except Exception as e:
+            if "429" in str(e): # 捕捉配額額滿錯誤
+                wait_time = (i + 1) * 3 # 第一次等3秒，第二次等6秒...
+                st.toast(f"⏳ 伺服器忙碌 (429)，{wait_time} 秒後自動重試 ({i+1}/{max_retries})...", icon="⚠️")
+                time.sleep(wait_time)
+            else:
+                raise e # 其他錯誤直接拋出
+    raise Exception("重試次數過多，請稍後再試或檢查 API 配額。")
 
 # --- 6. 網頁介面視覺設計 ---
 st.set_page_config(page_title="內湖國小 AI 輔助出題系統", layout="wide")
@@ -106,32 +122,22 @@ st.markdown("""
     .app-title { font-size: 15px; color: #94A3B8; margin-top: 6px; }
     h1, h2, h3, p, span, label, .stMarkdown { color: #E2E8F0 !important; }
     
-    /* 舒適型卡片 (間距拉寬優化) */
+    /* 舒適型卡片 */
     .comfort-box {
-        background-color: #1E293B; 
-        padding: 15px;               /* 增加內距 */
-        border-radius: 10px; 
-        margin-bottom: 15px;         /* 增加卡片間距 */
-        border-left: 5px solid #3B82F6; 
-        font-size: 14px;             /* 字體稍微加大 */
-        color: #CBD5E1; 
-        line-height: 1.8;            /* 行高增加，閱讀不擁擠 */
+        background-color: #1E293B; padding: 15px; border-radius: 10px; 
+        margin-bottom: 15px; border-left: 5px solid #3B82F6; 
+        font-size: 14px; color: #CBD5E1; line-height: 1.8;
     }
-    .comfort-box b { color: #fff; }
     .comfort-box a { color: #60A5FA !important; text-decoration: none; font-weight: bold; }
-    .comfort-box a:hover { text-decoration: underline; }
-    .comfort-box ul { margin: 0; padding-left: 1.2rem; }
-    .comfort-box li { margin-bottom: 5px; } /* 列表項目間距 */
-
-    /* 側邊欄元件舒適化 */
+    
+    /* 側邊欄元件 */
     [data-testid="stSidebar"] .stMarkdown { margin-bottom: 10px; } 
-    .stTextArea textarea { min-height: 80px; } /* 輸入框拉高 */
+    .stTextArea textarea { min-height: 80px; }
     .stTextArea { margin-bottom: 15px !important; }
     [data-testid="stSidebar"] .stButton > button { 
-        display: block; margin: 15px auto !important; /* 按鈕上下留白 */
-        width: 100%; border-radius: 8px; height: 42px; /* 按鈕加大 */
-        background-color: #334155; border: 1px solid #475569;
-        font-size: 15px;
+        display: block; margin: 15px auto !important; 
+        width: 100%; border-radius: 8px; height: 42px;
+        background-color: #334155; border: 1px solid #475569; font-size: 15px;
     }
     
     .footer { position: fixed; left: 0; bottom: 0; width: 100%; background-color: #0F172A; color: #475569; text-align: center; padding: 12px; font-size: 11px; border-top: 1px solid #1E293B; z-index: 100; }
@@ -148,10 +154,9 @@ if "phase" not in st.session_state: st.session_state.phase = 1
 if "chat_history" not in st.session_state: st.session_state.chat_history = []
 if "last_prompt_content" not in st.session_state: st.session_state.last_prompt_content = ""
 
-# --- Sidebar: 舒適版 (間距拉寬) ---
+# --- Sidebar ---
 with st.sidebar:
     st.markdown("### 🚀 快速指南")
-    
     st.markdown("""
     <div class="comfort-box">
         <ol style="margin:0; padding-left:1.2rem;">
@@ -221,8 +226,7 @@ if st.session_state.phase == 1:
                     if error_msg:
                         st.error(f"❌ API 連線錯誤：{error_msg}")
                     else:
-                        # 使用快取函數讀取檔案 (效能優化關鍵 🚀)
-                        content = extract_text_from_files(uploaded_files)
+                        content = extract_text_from_files(uploaded_files) # 使用快取讀取
                         
                         try:
                             st.toast(f"⚡ 啟動 AI 引擎 ({model_name}) 分析中...", icon="🤖")
@@ -239,10 +243,20 @@ if st.session_state.phase == 1:
                                 message_placeholder = st.empty()
                                 full_response = ""
                                 t_str = "、".join(selected_types)
-                                prompt_content = f"年級：{grade}, 科目：{subject}\n題型：{t_str}\n教材內容：\n{content}"
+                                prompt_content = f"""
+                                任務：Phase 1 學習目標提取
+                                年級：{grade}, 科目：{subject}
+                                題型：{t_str}
+                                教材內容：
+                                {content}
+                                ---
+                                請產出【學習目標審核表】。
+                                注意：僅產出表格，嚴禁產出試題！
+                                """
                                 st.session_state.last_prompt_content = prompt_content
                                 
-                                response = chat.send_message(prompt_content, stream=True)
+                                # 使用重試機制呼叫 AI
+                                response = generate_with_retry(chat, prompt_content, stream=True)
                                 
                                 for chunk in response:
                                     full_response += chunk.text
@@ -255,7 +269,8 @@ if st.session_state.phase == 1:
                                 st.session_state.chat_history.append({"role": "model", "content": full_response})
                                 st.session_state.phase = 2
                                 st.rerun()
-                        except Exception as e: st.error(f"連線失敗：{e}")
+                        except Exception as e: 
+                            st.error(f"連線失敗：{e} (請檢查 API Key 配額或稍後重試)")
 
 # --- Phase 2: 正式出題 ---
 elif st.session_state.phase == 2:
@@ -303,7 +318,8 @@ elif st.session_state.phase == 2:
                                 
                                 請正式產出【試題】與【參考答案卷】。
                                 """
-                                response = model_smart.generate_content(final_prompt, stream=True)
+                                # 使用重試機制
+                                response = generate_with_retry(model_smart, final_prompt, stream=True)
                                 for chunk in response:
                                     full_response += chunk.text
                                     message_placeholder.markdown(full_response + "▌")
@@ -339,7 +355,7 @@ elif st.session_state.phase == 2:
                 with st.chat_message("ai"):
                     message_placeholder = st.empty()
                     full_response = ""
-                    response = chat_pro.send_message(prompt, stream=True)
+                    response = generate_with_retry(chat_pro, prompt, stream=True)
                     for chunk in response:
                         full_response += chunk.text
                         message_placeholder.markdown(full_response + "▌")
