@@ -59,58 +59,28 @@ GEM_INSTRUCTIONS = """
 3. **分階段輸出**：Phase 1 審核表，Phase 2 試卷與答案。
 """
 
-# --- 5. 智能模型選擇器 (修復 404 錯誤) ---
+# --- 5. 智能模型選擇器 ---
 def get_best_model(api_key, mode="fast"):
-    """
-    自動偵測可用模型，避免寫死名稱導致報錯。
-    mode="fast": 優先找 flash, 其次 gemini-pro
-    mode="smart": 優先找 pro, 其次 1.5, 最後 gemini-pro
-    """
     genai.configure(api_key=api_key)
     try:
-        # 列出所有支援 generateContent 的模型
         models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        
-        if not models:
-            return None, "找不到任何可用模型"
-
-        # 根據需求挑選
+        if not models: return None, "找不到可用模型"
         target_model = None
-        
         if mode == "fast":
-            # 優先找名字裡有 'flash' 的
             for m in models:
-                if 'flash' in m.lower():
-                    target_model = m
-                    break
-            # 沒找到 flash，就找 gemini-pro (通常比較快)
+                if 'flash' in m.lower(): target_model = m; break
             if not target_model:
                 for m in models:
-                    if 'gemini-pro' in m.lower() and 'vision' not in m.lower():
-                        target_model = m
-                        break
-        
+                    if 'gemini-pro' in m.lower() and 'vision' not in m.lower(): target_model = m; break
         elif mode == "smart":
-            # 優先找名字裡有 'pro' 且是 '1.5' 的
             for m in models:
-                if 'pro' in m.lower() and '1.5' in m.lower():
-                    target_model = m
-                    break
-            # 沒找到 1.5 pro，找任何 pro
+                if 'pro' in m.lower() and '1.5' in m.lower(): target_model = m; break
             if not target_model:
                 for m in models:
-                    if 'pro' in m.lower():
-                        target_model = m
-                        break
-        
-        # 還是沒找到？隨便給一個
-        if not target_model:
-            target_model = models[0]
-            
+                    if 'pro' in m.lower(): target_model = m; break
+        if not target_model: target_model = models[0]
         return target_model, None
-        
-    except Exception as e:
-        return None, str(e)
+    except Exception as e: return None, str(e)
 
 # --- 6. 網頁介面視覺設計 ---
 st.set_page_config(page_title="內湖國小 AI 輔助出題系統", layout="wide")
@@ -137,7 +107,11 @@ st.markdown("""
     .step-box a { color: #60A5FA !important; text-decoration: none; font-weight: bold; }
     .step-box a:hover { text-decoration: underline; }
     
-    [data-testid="stSidebar"] .stButton > button { display: block; margin: 0 auto !important; }
+    /* 按鈕樣式調整 */
+    [data-testid="stSidebar"] .stButton > button { 
+        display: block; margin: 0 auto !important; 
+        width: 100%; border-radius: 8px;
+    }
     
     .footer { position: fixed; left: 0; bottom: 0; width: 100%; background-color: #0F172A; color: #475569; text-align: center; padding: 15px; font-size: 11px; border-top: 1px solid #1E293B; z-index: 100; }
     </style>
@@ -153,9 +127,10 @@ if "phase" not in st.session_state: st.session_state.phase = 1
 if "chat_history" not in st.session_state: st.session_state.chat_history = []
 if "last_prompt_content" not in st.session_state: st.session_state.last_prompt_content = ""
 
-# --- Sidebar ---
+# --- Sidebar: 詳細引導 ---
 with st.sidebar:
     st.markdown("### 🖥️ 快速開始指南")
+    # 修正登入說明：建議使用個人帳號
     st.markdown("""
     <div class="step-box">
         <b>Step 1. 前往官網</b><br>
@@ -163,7 +138,7 @@ with st.sidebar:
     </div>
     <div class="step-box">
         <b>Step 2. 登入帳號</b><br>
-        👤 請登入您的教育 Google 帳號
+        👤 <b>建議使用個人 Google 帳號</b><br>(教育帳號權限可能受限)
     </div>
     <div class="step-box">
         <b>Step 3. 取得金鑰</b><br>
@@ -178,12 +153,21 @@ with st.sidebar:
     api_input = st.text_area("在此輸入 API Key", height=70, placeholder="必填欄位")
     st.divider()
     
+    # --- 重置按鈕上移至此 ---
+    if st.button("🔄 重置系統進度"):
+        st.session_state.phase = 1
+        st.session_state.chat_history = []
+        st.session_state.last_prompt_content = ""
+        st.rerun()
+        
+    st.divider()
+    
     st.markdown("### 📂 資源快速連結")
     st.markdown("""
     <div class="step-box">
         <b>📖 教材資源下載</b><br>
         - <a href="https://webetextbook.knsh.com.tw/" target="_blank">康軒電子書</a><br>
-        - <a href="https://edisc3.hle.com.tw/" target="_blank">翰林行動大師 (新)</a><br>
+        - <a href="https://edisc3.hle.com.tw/" target="_blank">翰林行動大師</a><br>
         - <a href="https://reader.nani.com.tw/" target="_blank">南一 OneBox</a>
     </div>
     <div class="step-box">
@@ -192,13 +176,6 @@ with st.sidebar:
         - <a href="https://www.nhps.hc.edu.tw/" target="_blank">內湖國小校網</a>
     </div>
     """, unsafe_allow_html=True)
-    
-    st.divider()
-    if st.button("🔄 重置系統進度"):
-        st.session_state.phase = 1
-        st.session_state.chat_history = []
-        st.session_state.last_prompt_content = ""
-        st.rerun()
 
 # --- Phase 1: 規劃審核表 (使用快速模型) ---
 if st.session_state.phase == 1:
@@ -228,56 +205,55 @@ if st.session_state.phase == 1:
             elif not grade or not subject or not uploaded_files or not selected_types:
                 st.warning("⚠️ 動作中止：請確認年級、科目、題型與教材已備妥。")
             else:
-                # 取得可用 Key
-                keys = [k.strip() for k in api_input.replace('\n', ',').split(',') if k.strip()]
-                target_key = random.choice(keys)
-                
-                # 自動偵測最佳模型 (Fast Mode)
-                model_name, error_msg = get_best_model(target_key, mode="fast")
-                
-                if error_msg:
-                    st.error(f"❌ API 連線錯誤：{error_msg}")
-                else:
-                    content = ""
-                    for f in uploaded_files:
-                        ext = f.name.split('.')[-1].lower()
-                        if ext == 'pdf': content += read_pdf(f)
-                        elif ext == 'docx': content += read_docx(f)
-                        elif ext == 'doc': content += read_doc(f)
+                # 動畫效果：顯示 Spinner
+                with st.spinner("⚡ 正在極速掃描教材內容，請稍候..."):
+                    keys = [k.strip() for k in api_input.replace('\n', ',').split(',') if k.strip()]
+                    target_key = random.choice(keys)
+                    model_name, error_msg = get_best_model(target_key, mode="fast")
                     
-                    try:
-                        # 顯示目前使用的模型名稱
-                        st.toast(f"⚡ 正使用高速模型 ({model_name}) 分析中...")
+                    if error_msg:
+                        st.error(f"❌ API 連線錯誤：{error_msg}")
+                    else:
+                        content = ""
+                        for f in uploaded_files:
+                            ext = f.name.split('.')[-1].lower()
+                            if ext == 'pdf': content += read_pdf(f)
+                            elif ext == 'docx': content += read_docx(f)
+                            elif ext == 'doc': content += read_doc(f)
                         
-                        model_fast = genai.GenerativeModel(
-                            model_name=model_name,
-                            system_instruction=GEM_INSTRUCTIONS, 
-                            generation_config={"temperature": 0.0}
-                        )
-                        
-                        chat = model_fast.start_chat(history=[])
-                        
-                        with st.chat_message("ai"):
-                            message_placeholder = st.empty()
-                            full_response = ""
-                            t_str = "、".join(selected_types)
-                            prompt_content = f"年級：{grade}, 科目：{subject}\n題型：{t_str}\n教材內容：\n{content}"
-                            st.session_state.last_prompt_content = prompt_content
+                        try:
+                            # 顯示 Toast 通知
+                            st.toast(f"⚡ 啟動 AI 引擎 ({model_name}) 分析中...", icon="🤖")
                             
-                            response = chat.send_message(prompt_content, stream=True)
+                            model_fast = genai.GenerativeModel(
+                                model_name=model_name,
+                                system_instruction=GEM_INSTRUCTIONS, 
+                                generation_config={"temperature": 0.0}
+                            )
                             
-                            for chunk in response:
-                                full_response += chunk.text
-                                message_placeholder.markdown(full_response + "▌")
-                            message_placeholder.markdown(full_response)
-                        
-                        if "ERROR_SUBJECT_MISMATCH" in full_response:
-                            st.error(f"❌ 防呆啟動：教材內容與『{subject}』不符，請重新確認檔案。")
-                        else:
-                            st.session_state.chat_history.append({"role": "model", "content": full_response})
-                            st.session_state.phase = 2
-                            st.rerun()
-                    except Exception as e: st.error(f"連線失敗：{e}")
+                            chat = model_fast.start_chat(history=[])
+                            
+                            with st.chat_message("ai"):
+                                message_placeholder = st.empty()
+                                full_response = ""
+                                t_str = "、".join(selected_types)
+                                prompt_content = f"年級：{grade}, 科目：{subject}\n題型：{t_str}\n教材內容：\n{content}"
+                                st.session_state.last_prompt_content = prompt_content
+                                
+                                response = chat.send_message(prompt_content, stream=True)
+                                
+                                for chunk in response:
+                                    full_response += chunk.text
+                                    message_placeholder.markdown(full_response + "▌")
+                                message_placeholder.markdown(full_response)
+                            
+                            if "ERROR_SUBJECT_MISMATCH" in full_response:
+                                st.error(f"❌ 防呆啟動：教材內容與『{subject}』不符，請重新確認檔案。")
+                            else:
+                                st.session_state.chat_history.append({"role": "model", "content": full_response})
+                                st.session_state.phase = 2
+                                st.rerun()
+                        except Exception as e: st.error(f"連線失敗：{e}")
 
 # --- Phase 2: 正式出題 (使用強力模型) ---
 elif st.session_state.phase == 2:
@@ -297,48 +273,83 @@ elif st.session_state.phase == 2:
         cb1, cb2 = st.columns(2)
         with cb1:
             if st.button("✅ 審核表確認無誤，開始出題", type="primary", use_container_width=True):
-                keys = [k.strip() for k in api_input.replace('\n', ',').split(',') if k.strip()]
-                target_key = random.choice(keys)
-                
-                # 自動偵測最佳模型 (Smart Mode)
-                model_name, error_msg = get_best_model(target_key, mode="smart")
-                
-                if error_msg:
-                     st.error(f"❌ 無法啟動高階模型：{error_msg}")
-                else:
-                    st.toast(f"🧠 正使用旗艦模型 ({model_name}) 命題中...")
+                # 動畫效果：Phase 2 載入動畫
+                with st.spinner("🧠 正在進行深度推理命題，請稍候..."):
+                    keys = [k.strip() for k in api_input.replace('\n', ',').split(',') if k.strip()]
+                    target_key = random.choice(keys)
+                    model_name, error_msg = get_best_model(target_key, mode="smart")
                     
-                    try:
-                        model_smart = genai.GenerativeModel(
-                            model_name=model_name,
-                            system_instruction=GEM_INSTRUCTIONS,
-                            generation_config={"temperature": 0.2}
-                        )
+                    if error_msg:
+                         st.error(f"❌ 無法啟動高階模型：{error_msg}")
+                    else:
+                        st.toast(f"🧠 切換至深度思考模式 ({model_name})...", icon="💡")
                         
-                        with st.chat_message("ai"):
-                            message_placeholder = st.empty()
-                            full_response = ""
-                            final_prompt = f"""
-                            {st.session_state.last_prompt_content}
-                            ---
-                            審核表參考：
-                            {current_md}
+                        try:
+                            model_smart = genai.GenerativeModel(
+                                model_name=model_name,
+                                system_instruction=GEM_INSTRUCTIONS,
+                                generation_config={"temperature": 0.2}
+                            )
                             
-                            請正式產出【試題】與【參考答案卷】。
-                            """
-                            response = model_smart.generate_content(final_prompt, stream=True)
-                            for chunk in response:
-                                full_response += chunk.text
-                                message_placeholder.markdown(full_response + "▌")
-                            message_placeholder.markdown(full_response)
-                        
-                        st.session_state.chat_history.append({"role": "model", "content": full_response})
-                    except Exception as e: st.error(f"命題失敗：{e}")
+                            with st.chat_message("ai"):
+                                message_placeholder = st.empty()
+                                full_response = ""
+                                final_prompt = f"""
+                                {st.session_state.last_prompt_content}
+                                ---
+                                審核表參考：
+                                {current_md}
+                                
+                                請正式產出【試題】與【參考答案卷】。
+                                """
+                                response = model_smart.generate_content(final_prompt, stream=True)
+                                for chunk in response:
+                                    full_response += chunk.text
+                                    message_placeholder.markdown(full_response + "▌")
+                                message_placeholder.markdown(full_response)
+                            
+                            st.session_state.chat_history.append({"role": "model", "content": full_response})
+                        except Exception as e: st.error(f"命題失敗：{e}")
 
         with cb2:
             if st.button("⬅️ 返回修改參數", use_container_width=True):
                 st.session_state.phase = 1
                 st.session_state.chat_history = []
                 st.rerun()
+    
+    # 顯示出題歷史
+    if len(st.session_state.chat_history) > 1:
+        # Phase 2 已經在上方顯示，這邊主要處理後續微調
+        pass 
+
+    # 微調對話框
+    if len(st.session_state.chat_history) > 0:
+        if prompt := st.chat_input("對題目不滿意？請輸入指令微調 (如：第3題太難請換一題)"):
+            with st.chat_message("user"): st.markdown(prompt)
+            
+            with st.spinner("🔧 AI 正在修改試題..."):
+                keys = [k.strip() for k in api_input.replace('\n', ',').split(',') if k.strip()]
+                genai.configure(api_key=random.choice(keys))
+                model_pro = genai.GenerativeModel("gemini-1.5-pro", system_instruction=GEM_INSTRUCTIONS)
+                
+                # 建立臨時對話歷史
+                history_for_chat = []
+                history_for_chat.append({"role": "user", "parts": [st.session_state.last_prompt_content]})
+                history_for_chat.append({"role": "model", "parts": [current_md]})
+                if len(st.session_state.chat_history) > 1:
+                     history_for_chat.append({"role": "model", "parts": [st.session_state.chat_history[-1]["content"]]})
+                
+                chat_pro = model_pro.start_chat(history=history_for_chat)
+                
+                with st.chat_message("ai"):
+                    message_placeholder = st.empty()
+                    full_response = ""
+                    response = chat_pro.send_message(prompt, stream=True)
+                    for chunk in response:
+                        full_response += chunk.text
+                        message_placeholder.markdown(full_response + "▌")
+                    message_placeholder.markdown(full_response)
+                
+                st.session_state.chat_history.append({"role": "model", "content": full_response})
 
 st.markdown('<div class="footer">© 2026 新竹市香山區內湖國小. All Rights Reserved.</div>', unsafe_allow_html=True)
