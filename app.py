@@ -88,32 +88,40 @@ st.set_page_config(page_title="內湖國小 AI 輔助出題系統", layout="wide
 st.markdown("""
     <style>
     .stApp { background-color: #0F172A; }
-    .block-container { max-width: 1200px; padding-top: 2rem; padding-bottom: 5rem; }
+    .block-container { max-width: 1200px; padding-top: 1rem; padding-bottom: 5rem; }
     
     .school-header {
         background: linear-gradient(90deg, #1E293B 0%, #334155 100%);
-        padding: 30px; border-radius: 20px; text-align: center; margin-bottom: 30px; 
+        padding: 20px; border-radius: 15px; text-align: center; margin-bottom: 20px; 
         border: 1px solid #475569;
     }
-    .school-name { font-size: 28px; font-weight: 700; color: #F1F5F9; letter-spacing: 3px; }
-    .app-title { font-size: 16px; color: #94A3B8; margin-top: 8px; }
+    .school-name { font-size: 24px; font-weight: 700; color: #F1F5F9; letter-spacing: 3px; }
+    .app-title { font-size: 14px; color: #94A3B8; margin-top: 5px; }
     h1, h2, h3, p, span, label, .stMarkdown { color: #E2E8F0 !important; }
     
-    .step-box {
-        background-color: #1E293B; padding: 12px; border-radius: 10px; 
-        margin-bottom: 12px; border-left: 5px solid #3B82F6; font-size: 13px;
-        color: #CBD5E1;
+    /* 極致緊湊型卡片 (無捲軸優化) */
+    .compact-box {
+        background-color: #1E293B; padding: 10px; border-radius: 8px; 
+        margin-bottom: 8px; border-left: 4px solid #3B82F6; font-size: 13px;
+        color: #CBD5E1; line-height: 1.5;
     }
-    .step-box a { color: #60A5FA !important; text-decoration: none; font-weight: bold; }
-    .step-box a:hover { text-decoration: underline; }
-    
-    /* 按鈕樣式調整 */
+    .compact-box b { color: #fff; }
+    .compact-box a { color: #60A5FA !important; text-decoration: none; font-weight: bold; }
+    .compact-box a:hover { text-decoration: underline; }
+    .compact-box ul { margin: 0; padding-left: 1.2rem; }
+    .compact-box li { margin-bottom: 2px; }
+
+    /* 側邊欄元件緊湊化 */
+    [data-testid="stSidebar"] .stMarkdown { margin-bottom: -10px; } 
+    .stTextArea textarea { min-height: 60px; }
+    .stTextArea { margin-bottom: 5px !important; }
     [data-testid="stSidebar"] .stButton > button { 
-        display: block; margin: 0 auto !important; 
-        width: 100%; border-radius: 8px;
+        display: block; margin: 5px auto !important; 
+        width: 100%; border-radius: 6px; height: 35px;
+        background-color: #334155; border: 1px solid #475569;
     }
     
-    .footer { position: fixed; left: 0; bottom: 0; width: 100%; background-color: #0F172A; color: #475569; text-align: center; padding: 15px; font-size: 11px; border-top: 1px solid #1E293B; z-index: 100; }
+    .footer { position: fixed; left: 0; bottom: 0; width: 100%; background-color: #0F172A; color: #475569; text-align: center; padding: 10px; font-size: 10px; border-top: 1px solid #1E293B; z-index: 100; }
     </style>
     
     <div class="school-header">
@@ -127,60 +135,49 @@ if "phase" not in st.session_state: st.session_state.phase = 1
 if "chat_history" not in st.session_state: st.session_state.chat_history = []
 if "last_prompt_content" not in st.session_state: st.session_state.last_prompt_content = ""
 
-# --- Sidebar: 詳細引導 ---
+# --- Sidebar: 極致緊湊版 (無捲軸) ---
 with st.sidebar:
-    st.markdown("### 🖥️ 快速開始指南")
-    # 修正登入說明：建議使用個人帳號
+    st.markdown("### 🚀 快速指南")
+    # 將步驟合併為單一緊湊區塊 [cite: 2026-02-13]
     st.markdown("""
-    <div class="step-box">
-        <b>Step 1. 前往官網</b><br>
-        🔗 <a href="https://aistudio.google.com/" target="_blank">Google AI Studio (點我)</a>
-    </div>
-    <div class="step-box">
-        <b>Step 2. 登入帳號</b><br>
-        👤 <b>建議使用個人 Google 帳號</b><br>(教育帳號權限可能受限)
-    </div>
-    <div class="step-box">
-        <b>Step 3. 取得金鑰</b><br>
-        🆕 點擊 <b>"Get API key"</b> 並複製
-    </div>
-    <div class="step-box">
-        <b>Step 4. 啟用系統</b><br>
-        📋 貼到下方框內即可開始
+    <div class="compact-box">
+        <ol style="margin:0; padding-left:1.2rem;">
+            <li>前往 <a href="https://aistudio.google.com/" target="_blank">Google AI Studio (點我)</a></li>
+            <li>登入<b>個人 Google 帳號</b> (避開教育版)</li>
+            <li>點擊 <b>Get API key</b> 並複製</li>
+            <li>貼入下方欄位</li>
+        </ol>
     </div>
     """, unsafe_allow_html=True)
     
-    api_input = st.text_area("在此輸入 API Key", height=70, placeholder="必填欄位")
-    st.divider()
+    api_input = st.text_area("在此輸入 API Key", height=68, placeholder="請貼上金鑰...")
     
-    # --- 重置按鈕上移至此 ---
-    if st.button("🔄 重置系統進度"):
+    # 重置按鈕緊跟在輸入框下 [cite: 2026-02-13]
+    if st.button("🔄 重置系統"):
         st.session_state.phase = 1
         st.session_state.chat_history = []
         st.session_state.last_prompt_content = ""
         st.rerun()
-        
-    st.divider()
-    
-    st.markdown("### 📂 資源快速連結")
+
+    st.markdown("### 📚 資源連結")
+    # 資源連結合併為單一區塊 [cite: 2026-02-13]
     st.markdown("""
-    <div class="step-box">
-        <b>📖 教材資源下載</b><br>
-        - <a href="https://webetextbook.knsh.com.tw/" target="_blank">康軒電子書</a><br>
-        - <a href="https://edisc3.hle.com.tw/" target="_blank">翰林行動大師</a><br>
-        - <a href="https://reader.nani.com.tw/" target="_blank">南一 OneBox</a>
-    </div>
-    <div class="step-box">
-        <b>🏛️ 官方參考資料</b><br>
-        - <a href="https://cirn.moe.edu.tw/Syllabus/index.aspx?sid=1108" target="_blank">108 課綱資源網 (CIRN)</a><br>
-        - <a href="https://www.nhps.hc.edu.tw/" target="_blank">內湖國小校網</a>
+    <div class="compact-box">
+        <b>教材下載：</b>
+        <a href="https://webetextbook.knsh.com.tw/" target="_blank">康軒</a> | 
+        <a href="https://edisc3.hle.com.tw/" target="_blank">翰林</a> | 
+        <a href="https://reader.nani.com.tw/" target="_blank">南一</a><br>
+        <b>參考資料：</b>
+        <a href="https://cirn.moe.edu.tw/Syllabus/index.aspx?sid=1108" target="_blank">108課綱(CIRN)</a> | 
+        <a href="https://www.nhps.hc.edu.tw/" target="_blank">校網</a>
     </div>
     """, unsafe_allow_html=True)
 
-# --- Phase 1: 規劃審核表 (使用快速模型) ---
+# --- Phase 1: 參數設定與教材上傳 ---
 if st.session_state.phase == 1:
     with st.container(border=True):
-        st.markdown("### 📍 第一階段：參數設定與學習目標規劃")
+        # 標題更名 [cite: 2026-02-13]
+        st.markdown("### 📍 第一階段：參數設定與教材上傳")
         
         c1, c2, c3 = st.columns(3)
         with c1: grade = st.selectbox("1. 選擇年級", ["", "一年級", "二年級", "三年級", "四年級", "五年級", "六年級"], index=0)
@@ -197,15 +194,14 @@ if st.session_state.phase == 1:
                 selected_types.append(t)
         
         st.divider()
-        uploaded_files = st.file_uploader("5. 上傳教材檔案", type=["pdf", "docx", "doc"], accept_multiple_files=True)
+        uploaded_files = st.file_uploader("5. 上傳教材檔案 (Word/PDF)", type=["pdf", "docx", "doc"], accept_multiple_files=True)
         
         if st.button("🚀 產出學習目標審核表", type="primary", use_container_width=True):
             if not api_input:
-                st.error("❌ 動作中止：尚未輸入 API Key。")
+                st.error("❌ 動作中止：側邊欄尚未輸入 API Key。")
             elif not grade or not subject or not uploaded_files or not selected_types:
                 st.warning("⚠️ 動作中止：請確認年級、科目、題型與教材已備妥。")
             else:
-                # 動畫效果：顯示 Spinner
                 with st.spinner("⚡ 正在極速掃描教材內容，請稍候..."):
                     keys = [k.strip() for k in api_input.replace('\n', ',').split(',') if k.strip()]
                     target_key = random.choice(keys)
@@ -222,7 +218,6 @@ if st.session_state.phase == 1:
                             elif ext == 'doc': content += read_doc(f)
                         
                         try:
-                            # 顯示 Toast 通知
                             st.toast(f"⚡ 啟動 AI 引擎 ({model_name}) 分析中...", icon="🤖")
                             
                             model_fast = genai.GenerativeModel(
@@ -255,7 +250,7 @@ if st.session_state.phase == 1:
                                 st.rerun()
                         except Exception as e: st.error(f"連線失敗：{e}")
 
-# --- Phase 2: 正式出題 (使用強力模型) ---
+# --- Phase 2: 正式出題 ---
 elif st.session_state.phase == 2:
     current_md = st.session_state.chat_history[0]["content"]
     
@@ -273,7 +268,6 @@ elif st.session_state.phase == 2:
         cb1, cb2 = st.columns(2)
         with cb1:
             if st.button("✅ 審核表確認無誤，開始出題", type="primary", use_container_width=True):
-                # 動畫效果：Phase 2 載入動畫
                 with st.spinner("🧠 正在進行深度推理命題，請稍候..."):
                     keys = [k.strip() for k in api_input.replace('\n', ',').split(',') if k.strip()]
                     target_key = random.choice(keys)
@@ -317,14 +311,9 @@ elif st.session_state.phase == 2:
                 st.session_state.chat_history = []
                 st.rerun()
     
-    # 顯示出題歷史
-    if len(st.session_state.chat_history) > 1:
-        # Phase 2 已經在上方顯示，這邊主要處理後續微調
-        pass 
-
     # 微調對話框
-    if len(st.session_state.chat_history) > 0:
-        if prompt := st.chat_input("對題目不滿意？請輸入指令微調 (如：第3題太難請換一題)"):
+    if len(st.session_state.chat_history) > 1:
+        if prompt := st.chat_input("對題目不滿意？請輸入指令微調"):
             with st.chat_message("user"): st.markdown(prompt)
             
             with st.spinner("🔧 AI 正在修改試題..."):
@@ -332,7 +321,6 @@ elif st.session_state.phase == 2:
                 genai.configure(api_key=random.choice(keys))
                 model_pro = genai.GenerativeModel("gemini-1.5-pro", system_instruction=GEM_INSTRUCTIONS)
                 
-                # 建立臨時對話歷史
                 history_for_chat = []
                 history_for_chat.append({"role": "user", "parts": [st.session_state.last_prompt_content]})
                 history_for_chat.append({"role": "model", "parts": [current_md]})
