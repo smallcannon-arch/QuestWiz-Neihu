@@ -93,7 +93,12 @@ if not st.session_state.chat_history:
         user_msg = f"科目：{subject}\n年級：{grade}\n模式：{mode}\n任務：請自動從上傳資料中抓取各單元節數並計算 100 分之配分比例。\n資料內容：{all_text}"
         
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel("gemini-1.5-pro", system_instruction=SYSTEM_PROMPT)
+        model = genai.GenerativeModel(
+        model_name="models/gemini-1.5-pro", 
+        system_instruction=SYSTEM_PROMPT
+    )
+except Exception as e:
+    st.error(f"模型初始化失敗，請檢查 API Key 或模型權限。錯誤資訊：{e}")
         chat = model.start_chat(history=[])
         
         with st.spinner("AI 正在掃描節數並計算配分權重..."):
@@ -117,3 +122,4 @@ else:
     if st.button("🔄 重新設定 (新試卷)"):
         st.session_state.chat_history = []
         st.rerun()
+
