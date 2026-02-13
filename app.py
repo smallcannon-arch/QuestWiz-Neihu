@@ -1,331 +1,297 @@
 import streamlit as st
 import google.generativeai as genai
+import random
 import io
-import pandas as pd
-import math
-import tempfile
-import os
 import time
+from pypdf import PdfReader
+from docx import Document
+import pandas as pd
+import subprocess
+import os
+import re # 新增：用於文字清洗
 
-# 嘗試匯入 Python 文檔處理套件 (防呆)
-try:
-    from docx import Document
-    HAS_DOCX = True
-except ImportError:
-    HAS_DOCX = False
+# --- 1. 定義學科與題型映射 ---
+SUBJECT_Q_TYPES = {
+    "國語": ["國字注音", "造句", "單選題", "閱讀素養題", "句型變換", "簡答題"],
+    "數學": ["應用計算題", "圖表分析題", "填充題", "單選題", "是非題"],
+    "自然科學": ["實驗判讀題", "圖表分析題", "單選題", "是非題", "填充題", "配合題"],
+    "社會": ["地圖判讀題", "情境案例分析", "單選題", "是非題", "配合題", "簡答題"],
+    "英語": ["英語會話選擇", "詞彙搭配", "文意選填", "單選題", "閱讀理解"],
+    "": ["單選題", "是非題", "填充題", "簡答題"]
+}
 
-try:
-    from pptx import Presentation
-    HAS_PPTX = True
-except ImportError:
-    HAS_PPTX = False
-
-# --- 1. 自動搜尋可用模型 (修復 404 的關鍵) ---
-def get_valid_model_name(api_key):
-    """
-    自動詢問 Google 帳號有哪些模型可用，避免寫死名稱導致 404 錯誤。
-    """
-    try:
-        genai.configure(api_key=api_key)
-        # 列出所有支援生成內容的模型
-        models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        
-        if not models:
-            return "models/gemini-1.5-flash" # 如果真的抓不到，只好盲猜一個
-            
-        # 優先順序 1: Gemini 1.5 Flash (最快最省)
-        for m in models:
-            if 'flash' in m.lower() and '1.5' in m.lower(): return m
-            
-        # 優先順序 2: Gemini 1.5 Pro (最強)
-        for m in models:
-            if 'pro' in m.lower() and '1.5' in m.lower(): return m
-            
-        # 優先順序 3: 任何 Flash
-        for m in models:
-            if 'flash' in m.lower(): return m
-            
-        # 最後手段: 列表中的第一個
-        return models[0]
-        
-    except Exception as e:
-        # 如果連列表都列不出來，通常是 API Key 錯了，但我們還是回傳一個預設值
-        return "models/gemini-1.5-flash"
-
-# --- 2. 核心邏輯：檔案處理 (暴力讀取版) ---
-def process_file_for_ai(uploaded_file, api_key):
-    genai.configure(api_key=api_key)
-    filename = uploaded_file.name.lower()
-    
-    # === 策略 A: PDF 直讀模式 (視覺分析) ===
-    if filename.endswith(".pdf"):
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
-            tmp_file.write(uploaded_file.getvalue())
-            tmp_path = tmp_file.name
-        
+# --- 2. 檔案讀取工具 (強化版：分頁+清洗) ---
+@st.cache_data
+def extract_text_from_files(files):
+    text_content = ""
+    for file in files:
         try:
-            st.toast(f"正在將 {uploaded_file.name} 傳送至 AI 視覺中樞...", icon="👁️")
-            gemini_file = genai.upload_file(path=tmp_path, mime_type="application/pdf")
+            file_text = ""
+            ext = file.name.split('.')[-1].lower()
             
-            while gemini_file.state.name == "PROCESSING":
-                time.sleep(1)
-                gemini_file = genai.get_file(gemini_file.name)
+            if ext == 'pdf':
+                pdf_reader = PdfReader(file)
+                # 加上頁碼標記，幫助 AI 區分單元邊界
+                for i, page in enumerate(pdf_reader.pages):
+                    content = page.extract_text() or ""
+                    file_text += f"\n--- Page {i+1} ---\n{content}"
+            elif ext == 'docx':
+                doc = Document(file)
+                # 保留段落結構
+                file_text = "\n".join([p.text for p in doc.paragraphs])
+            elif ext == 'doc':
+                with open("temp.doc", "wb") as f: f.write(file.getbuffer())
+                result = subprocess.run(['antiword', 'temp.doc'], capture_output=True, text=True)
+                if result.returncode == 0:
+                    file_text = result.stdout
+                if os.path.exists("temp.doc"): os.remove("temp.doc")
             
-            if gemini_file.state.name == "FAILED":
-                return "error", "Google AI 無法讀取此 PDF (可能是加密或損壞)。"
-            
-            return "file_mode", gemini_file
+            # --- 文字清洗區 ---
+            # 1. 移除連續多餘的空行，縮減 Token
+            file_text = re.sub(r'\n\s*\n', '\n\n', file_text)
+            text_content += f"\n\n=== 檔案: {file.name} ===\n{file_text}"
             
         except Exception as e:
-            return "error", str(e)
-        finally:
-            if os.path.exists(tmp_path): os.remove(tmp_path)
-
-    # === 策略 B: Word/PPT 結構化文字模式 ===
-    else:
-        st.toast(f"正在解析 {uploaded_file.name} 文字結構...", icon="📝")
-        text_content = ""
-        header = f"\n\n=== 檔案：{uploaded_file.name} ===\n"
-
-        try:
-            if filename.endswith('.docx'):
-                if HAS_DOCX:
-                    doc = Document(uploaded_file)
-                    paragraphs = []
-                    for p in doc.paragraphs:
-                        text = p.text.strip()
-                        if text:
-                            # 強制加符號，讓 AI 知道這是列表
-                            prefix = "● " if len(text) < 80 else ""
-                            paragraphs.append(f"{prefix}{text}")
-                    text_content = "\n".join(paragraphs)
-                else:
-                    return "error", "系統缺少 python-docx 套件，無法讀取 Word 檔。"
+            text_content += f"\n[讀取錯誤: {file.name} - {str(e)}]"
             
-            elif filename.endswith('.pptx'):
-                if HAS_PPTX:
-                    prs = Presentation(uploaded_file)
-                    for slide_idx, slide in enumerate(prs.slides):
-                        slide_text = []
-                        for shape in slide.shapes:
-                            if hasattr(shape, "text") and shape.text.strip():
-                                slide_text.append(f"● {shape.text}")
-                        if slide_text:
-                            text_content += f"\n[Slide {slide_idx+1}]\n" + "\n".join(slide_text) + "\n"
-                else:
-                    return "error", "系統缺少 python-pptx 套件，無法讀取 PPT 檔。"
-            
-            elif filename.endswith('.txt'):
-                text_content = str(uploaded_file.read(), "utf-8")
-            
-            else:
-                return "error", "不支援的格式。請上傳 PDF (最佳), DOCX, PPTX 或 TXT。"
+    return text_content
 
-            return "text_mode", header + text_content
+# --- 3. 核心 Gem 命題鐵律 (Phase 1 專用：審核表生成) ---
+# 這裡稍微修改，教導 AI 如何「分配分數」
+GEM_INSTRUCTIONS_PHASE1 = """
+你是「國小專業定期評量命題 AI」。
 
-        except Exception as e:
-            return "error", f"讀取失敗: {str(e)}"
+### ⚠️ Phase 1 任務目標：
+請閱讀使用者提供的教材內容，整理出一份【學習目標審核表】。
 
-# --- 3. 算分核心 (總分 100 鎖定) ---
-def calculate_scores(df):
-    if df is None or df.empty: return df
-    if '預計配分' not in df.columns: df['預計配分'] = 0.0
-
-    try:
-        if '授課節數' in df.columns: df.rename(columns={'授課節數': '單元總節數'}, inplace=True)
-        
-        # 強制轉數值
-        df['單元總節數'] = pd.to_numeric(df['單元總節數'], errors='coerce').fillna(1)
-        
-        # 演算法：單元時數分配
-        unit_counts = df['單元名稱'].value_counts()
-        
-        def get_objective_weight(row):
-            unit = row['單元名稱']
-            total_hours = row['單元總節數']
-            count = unit_counts.get(unit, 1)
-            if count == 0: count = 1
-            return total_hours / count
-
-        df['目標權重(時數)'] = df.apply(get_objective_weight, axis=1)
-
-        # 總時數
-        unique_units = df[['單元名稱', '單元總節數']].drop_duplicates()
-        total_course_hours = unique_units['單元總節數'].sum()
-        if total_course_hours == 0: total_course_hours = 1
-
-        # 配分
-        df['原始配分'] = (df['目標權重(時數)'] / total_course_hours) * 100
-        df['預計配分'] = df['原始配分'].apply(lambda x: round(x, 1))
-
-        # 100分校正
-        current_sum = df['預計配分'].sum()
-        diff = 100 - current_sum
-        if abs(diff) > 0.01:
-            df.iloc[-1, df.columns.get_loc('預計配分')] += diff
-
-        return df
-    except Exception as e:
-        st.error(f"算分邏輯錯誤: {e}")
-        return df
-
-# --- 4. Excel 下載器 ---
-def df_to_excel(df):
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        export_df = df.copy()
-        cols = ['單元名稱', '單元總節數', '學習目標', '目標權重(時數)', '預計配分']
-        final_cols = [c for c in cols if c in export_df.columns]
-        export_df = export_df[final_cols]
-        if '目標權重(時數)' in export_df.columns:
-            export_df.rename(columns={'目標權重(時數)': '此目標佔用節數'}, inplace=True)
-        
-        export_df.to_excel(writer, index=False, sheet_name='審核表')
-        workbook = writer.book
-        worksheet = writer.sheets['審核表']
-        header_fmt = workbook.add_format({'bold': True, 'align': 'center', 'bg_color': '#DCE6F1', 'border': 1})
-        text_fmt = workbook.add_format({'text_wrap': True, 'valign': 'top', 'border': 1})
-        num_fmt = workbook.add_format({'num_format': '0.0', 'border': 1, 'align': 'center'})
-        
-        worksheet.set_column('A:A', 15, text_fmt)
-        worksheet.set_column('B:B', 12, num_fmt)
-        worksheet.set_column('C:C', 60, text_fmt)
-        worksheet.set_column('D:E', 12, num_fmt)
-        
-        for i, col in enumerate(export_df.columns):
-            worksheet.write(0, i, col, header_fmt)
-            
-    return output.getvalue()
-
-# --- 5. Prompt ---
-GEM_EXTRACT_PROMPT = """
-你是一個精準的教材分析師。請閱讀提供的教材，提取「單元名稱」、「學習目標」與「單元總授課節數」。
-
-**任務 1：抓取授課節數 (Teaching Hours)**
-- 請在文中搜尋代表時間的關鍵字，如「5節」、「六堂課」、「40分鐘 x 3」等。
-- 將該單元的**總節數**填入表格。
-- 若找不到，請根據單元內容份量推估 (填入 1~5 的數字)。
-
-**任務 2：拆解學習目標 (Explode Rows)**
-- 看到編號 (1. 2. 3...) 或列表符號 (●, -)，**必須將每一個目標拆成獨立的一列 (Row)**。
-- 範例：若單元有 3 個重點，請輸出 3 列，這 3 列的「單元名稱」與「授課節數」都相同。
-- **嚴禁合併**。
-
-**輸出格式 (Markdown 表格)**
-欄位：| 單元名稱 | 學習目標 | 授課節數 |
+### 絕對規則 (違反將導致系統崩潰)：
+1. **配分邏輯**：請根據各單元內容的「篇幅長度」與「重要性」，將總分分配為 **剛好 100 分**。
+2. **禁止廢話**：**嚴禁** 撰寫前言 (如 "好的，這是我整理的...") 或結語。
+3. **禁止出題**：現在還不是出題階段，**嚴禁** 產出題目。
+4. **格式要求**：
+   - 僅輸出標準 Markdown 表格。
+   - 欄位必須包含：| 單元名稱 | 學習目標(原文) | 對應題型 | 預計配分 |
+   - **每一列資料必須強制換行**，不可接在同一行。
 """
 
-# --- 6. 主程式 ---
-st.set_page_config(page_title="內湖國小 AI 命題系統 (Auto-Fix)", layout="wide")
+# --- 4. 智能模型選擇與重試機制 ---
+def get_best_model(api_key, mode="fast"):
+    genai.configure(api_key=api_key)
+    try:
+        models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        if not models: return None, "找不到可用模型"
+        target_model = None
+        # 優先選擇 flash 模型以求快速與長文本處理能力
+        if mode == "fast":
+            for m in models:
+                if 'flash' in m.lower(): target_model = m; break
+            if not target_model: target_model = models[0]
+        # 這裡保留 smart 邏輯給第二階段用
+        elif mode == "smart":
+            for m in models:
+                if 'pro' in m.lower() and '1.5' in m.lower(): target_model = m; break
+            if not target_model: target_model = models[0]
+            
+        return target_model, None
+    except Exception as e: return None, str(e)
 
-st.markdown("""<div style="background:#1E293B;padding:15px;text-align:center;color:white;border-radius:10px;">
-<h2>內湖國小 AI 命題系統 (Auto-Fix 版)</h2></div>""", unsafe_allow_html=True)
+def generate_with_retry(model_or_chat, prompt, stream=True):
+    max_retries = 3
+    for i in range(max_retries):
+        try:
+            if hasattr(model_or_chat, 'send_message'):
+                return model_or_chat.send_message(prompt, stream=stream)
+            else:
+                return model_or_chat.generate_content(prompt, stream=stream)
+        except Exception as e:
+            if "429" in str(e):
+                wait_time = (i + 1) * 3
+                st.toast(f"⏳ 伺服器忙碌，休息 {wait_time} 秒後再試...", icon="☕")
+                time.sleep(wait_time)
+            else:
+                raise e
+    raise Exception("連線逾時，請檢查 API Key 或網路狀態。")
 
-if "extracted_data" not in st.session_state: st.session_state.extracted_data = None
-if "step" not in st.session_state: st.session_state.step = 1
+# --- 5. 網頁介面配置 ---
+st.set_page_config(page_title="內湖國小 AI 輔助出題系統", layout="wide")
 
+# (保留原本的 CSS 樣式)
+st.markdown("""
+    <style>
+    header[data-testid="stHeader"] { display: none !important; visibility: hidden !important; }
+    footer { display: none !important; visibility: hidden !important; }
+    .stApp { background-color: #0F172A; }
+    .block-container { max-width: 1200px; padding-top: 1.5rem !important; padding-bottom: 5rem; }
+    .school-header {
+        background: linear-gradient(90deg, #1E293B 0%, #334155 100%);
+        padding: 25px; border-radius: 18px; text-align: center; margin-bottom: 25px; 
+        border: 1px solid #475569;
+    }
+    .school-name { font-size: 26px; font-weight: 700; color: #F1F5F9; letter-spacing: 3px; }
+    .app-title { font-size: 15px; color: #94A3B8; margin-top: 6px; }
+    h1, h2, h3, p, span, label, .stMarkdown { color: #E2E8F0 !important; }
+    .comfort-box {
+        background-color: #1E293B; padding: 15px; border-radius: 10px; 
+        margin-bottom: 15px; border-left: 5px solid #3B82F6; 
+        font-size: 14px; color: #CBD5E1; line-height: 1.8;
+    }
+    .comfort-box b { color: #fff; }
+    .comfort-box a { color: #60A5FA !important; text-decoration: none; font-weight: bold; }
+    [data-testid="stSidebar"] .stMarkdown { margin-bottom: 10px; } 
+    .stTextArea textarea { min-height: 80px; }
+    .stTextArea { margin-bottom: 15px !important; }
+    [data-testid="stSidebar"] .stButton > button { 
+        display: block; margin: 15px auto !important; 
+        width: 100%; border-radius: 8px; height: 42px;
+        background-color: #334155; border: 1px solid #475569; font-size: 15px;
+    }
+    .custom-footer { 
+        position: fixed; left: 0; bottom: 0; width: 100%; 
+        background-color: #0F172A; color: #475569; 
+        text-align: center; padding: 12px; font-size: 11px; 
+        border-top: 1px solid #1E293B; z-index: 100; 
+    }
+    </style>
+    <div class="school-header">
+        <div class="school-name">新竹市香山區內湖國小</div>
+        <div class="app-title">評量命題與學習目標自動化系統</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+# 狀態管理
+if "phase" not in st.session_state: st.session_state.phase = 1 
+if "chat_history" not in st.session_state: st.session_state.chat_history = []
+if "last_prompt_content" not in st.session_state: st.session_state.last_prompt_content = ""
+
+# --- Sidebar ---
 with st.sidebar:
-    st.header("設定")
-    api_key = st.text_input("Google API Key", type="password")
+    st.markdown("### 🚀 系統設定")
+    api_input = st.text_area("在此輸入 API Key", height=80, placeholder="請貼上 Google AI Studio 金鑰...")
     
-    st.divider()
-    if HAS_DOCX: st.caption("✅ DOCX 模組正常")
-    else: st.error("❌ 缺 python-docx (無法讀 Word)")
-    
-    if st.button("🔄 重置"): 
-        st.session_state.extracted_data = None
-        st.session_state.step = 1
+    if st.button("🔄 重置系統"):
+        st.session_state.phase = 1
+        st.session_state.chat_history = []
+        st.session_state.last_prompt_content = ""
         st.rerun()
 
-# Step 1: 上傳
-if st.session_state.step == 1:
-    st.info("💡 支援 PDF (最強，可讀掃描檔)、Word、PPT。請直接上傳，AI 會想辦法硬讀。")
-    uploaded_files = st.file_uploader("選擇教材檔案", type=["pdf", "docx", "pptx", "txt"], accept_multiple_files=True)
-    
-    if st.button("🚀 開始分析 & 自動配分", type="primary", use_container_width=True):
-        if api_key and uploaded_files:
-            with st.spinner("AI 正在選取最佳模型並分析資料..."):
-                all_data = []
-                # 自動取得最佳模型名稱 (關鍵修復！)
-                model_name = get_valid_model_name(api_key)
-                st.toast(f"已連線至模型：{model_name}", icon="🤖")
-                
-                # 處理多個檔案
-                for file in uploaded_files:
-                    try:
-                        # 1. 決定讀取策略
-                        mode, payload = process_file_for_ai(file, api_key)
-                        
-                        if mode == "error":
-                            st.warning(f"跳過檔案 {file.name}: {payload}")
-                            continue
+    st.markdown("### 📚 資源連結")
+    st.markdown("""
+    <div class="comfort-box">
+        <b>教材下載：</b><br>
+        • <a href="https://webetextbook.knsh.com.tw/" target="_blank">康軒電子書</a><br>
+        • <a href="https://edisc3.hle.com.tw/" target="_blank">翰林行動大師</a><br>
+        • <a href="https://reader.nani.com.tw/" target="_blank">南一 OneBox</a>
+    </div>
+    """, unsafe_allow_html=True)
 
-                        # 2. 呼叫 Gemini
-                        model = genai.GenerativeModel(model_name)
+# --- Phase 1: 參數設定與教材上傳 ---
+if st.session_state.phase == 1:
+    with st.container(border=True):
+        st.markdown("### 📍 第一階段：參數設定與教材上傳")
+        
+        c1, c2, c3 = st.columns(3)
+        with c1: grade = st.selectbox("1. 選擇年級", ["", "一年級", "二年級", "三年級", "四年級", "五年級", "六年級"], index=0)
+        with c2: subject = st.selectbox("2. 選擇科目", ["", "國語", "數學", "自然科學", "社會", "英語"], index=0)
+        with c3: mode = st.selectbox("3. 命題模式", ["🟢 模式 A：適中", "🔴 模式 B：困難", "🌟 模式 C：素養"], index=0)
+        
+        st.divider()
+        st.markdown("**4. 勾選欲產出的題型**")
+        available_types = SUBJECT_Q_TYPES.get(subject, SUBJECT_Q_TYPES[""])
+        cols = st.columns(min(len(available_types), 4))
+        selected_types = []
+        for i, t in enumerate(available_types):
+            if cols[i % len(cols)].checkbox(t, value=True):
+                selected_types.append(t)
+        
+        st.divider()
+        uploaded_files = st.file_uploader("5. 上傳教材檔案 (Word/PDF)", type=["pdf", "docx", "doc"], accept_multiple_files=True)
+        
+        if st.button("🚀 產出學習目標審核表", type="primary", use_container_width=True):
+            if not api_input:
+                st.error("❌ 動作中止：側邊欄尚未輸入 API Key。")
+            elif not grade or not subject or not uploaded_files or not selected_types:
+                st.warning("⚠️ 動作中止：請確認年級、科目、題型與教材已備妥。")
+            else:
+                with st.spinner("⚡ 正在極速掃描教材內容，請稍候..."):
+                    # 1. 準備 API
+                    keys = [k.strip() for k in api_input.replace('\n', ',').split(',') if k.strip()]
+                    target_key = random.choice(keys)
+                    model_name, error_msg = get_best_model(target_key, mode="fast")
+                    
+                    if error_msg:
+                        st.error(f"❌ API 連線錯誤：{error_msg}")
+                    else:
+                        # 2. 讀取並清洗檔案
+                        content = extract_text_from_files(uploaded_files)
                         
-                        if mode == "file_mode":
-                            # 視覺模式 (PDF)
-                            response = model.generate_content([GEM_EXTRACT_PROMPT, payload])
-                        else:
-                            # 文字模式 (DOCX/PPTX)
-                            response = model.generate_content(GEM_EXTRACT_PROMPT + f"\n\n教材內容：\n{payload}")
-
-                        # 3. 解析回應
-                        lines = [l.strip() for l in response.text.split('\n') if "|" in l and "---" not in l]
-                        for l in lines:
-                            row = [c.strip() for c in l.split('|') if c.strip()]
-                            if len(row) >= 3: all_data.append(row[:3])
+                        try:
+                            st.toast(f"⚡ 啟動 AI 引擎 ({model_name}) 分析中...", icon="🤖")
                             
-                    except Exception as e:
-                        st.error(f"處理 {file.name} 時發生錯誤: {e}")
+                            # 3. 設定 Phase 1 專用模型
+                            model_fast = genai.GenerativeModel(
+                                model_name=model_name,
+                                system_instruction=GEM_INSTRUCTIONS_PHASE1, 
+                                generation_config={"temperature": 0.0} # 溫度 0 確保格式最穩定
+                            )
+                            
+                            chat = model_fast.start_chat(history=[])
+                            
+                            with st.chat_message("ai"):
+                                message_placeholder = st.empty()
+                                full_response = ""
+                                t_str = "、".join(selected_types)
+                                
+                                # 4. 構建精準 Prompt
+                                prompt_content = f"""
+                                任務：分析以下教材並產出審核表。
+                                
+                                【參數設定】
+                                年級：{grade}
+                                科目：{subject}
+                                可用題型：{t_str}
+                                
+                                【教材內容】
+                                {content}
+                                
+                                【執行步驟】
+                                1. 識別教材中的單元結構。
+                                2. 提取具體的學習目標（Key Learning Points）。
+                                3. 根據內容長度，計算該單元應佔總分 100 分中的多少比例。
+                                4. 僅輸出 Markdown 表格。
+                                """
+                                st.session_state.last_prompt_content = prompt_content
+                                
+                                # 5. 串流輸出
+                                response = generate_with_retry(chat, prompt_content, stream=True)
+                                
+                                for chunk in response:
+                                    if chunk.text:
+                                        full_response += chunk.text
+                                        message_placeholder.markdown(full_response + "▌")
+                                message_placeholder.markdown(full_response)
+                            
+                            # 6. 狀態保存與換頁
+                            # 簡單防呆：確保有產出表格
+                            if "|" in full_response and "單元" in full_response:
+                                st.session_state.chat_history.append({"role": "model", "content": full_response})
+                                st.session_state.phase = 2
+                                time.sleep(1) # 稍微緩衝讓使用者看清結果
+                                st.rerun()
+                            else:
+                                st.error("❌ AI 產出格式異常，未偵測到表格，請檢查教材檔案是否清晰。")
+                                
+                        except Exception as e: 
+                            st.error(f"連線失敗：{e} (請檢查 API Key 或稍後重試)")
 
-                if all_data:
-                    # 轉成 DataFrame
-                    df = pd.DataFrame(all_data[1:], columns=["單元名稱", "學習目標", "授課節數"])
-                    # 排除可能的標題列
-                    if "單元" in str(df.iloc[0,0]): 
-                        df = df.iloc[1:].reset_index(drop=True)
-                    
-                    df.rename(columns={"授課節數": "單元總節數"}, inplace=True)
-                    
-                    # 進入算分
-                    df_cal = calculate_scores(df)
-                    st.session_state.extracted_data = df_cal
-                    st.session_state.step = 2
-                    st.rerun()
-                else:
-                    st.error("AI 讀不到任何表格資料。請確認檔案內容。")
-
-# Step 2: 結果確認
-elif st.session_state.step == 2:
-    st.success("✅ 資料提取成功！配分已自動計算。")
-    st.markdown("請檢查 **「單元總節數」** 是否正確。若 AI 抓錯 (例如抓成 1)，請手動修改，配分會立刻重算。")
+# --- Phase 2: 這裡先留白或顯示簡單訊息，等待你下一步指令 ---
+elif st.session_state.phase == 2:
+    st.info("✅ 第一階段完成！審核表已生成 (Phase 2 待續...)")
+    current_md = st.session_state.chat_history[0]["content"]
+    st.markdown(current_md)
     
-    df_curr = st.session_state.extracted_data
-    
-    # 編輯器
-    edited_df = st.data_editor(
-        df_curr,
-        column_config={
-            "單元名稱": st.column_config.TextColumn(disabled=True),
-            "學習目標": st.column_config.TextColumn(width="large"),
-            "單元總節數": st.column_config.NumberColumn("單元總節數", min_value=1, max_value=50, help="修改此處，配分自動更新"),
-            "目標權重(時數)": st.column_config.NumberColumn("此目標佔用", disabled=True, format="%.2f"),
-            "預計配分": st.column_config.NumberColumn("配分 (%)", disabled=True)
-        },
-        use_container_width=True,
-        num_rows="dynamic"
-    )
-    
-    # 即時重算
-    if not edited_df.equals(df_curr):
-        st.session_state.extracted_data = calculate_scores(edited_df)
+    if st.button("⬅️ 返回重來"):
+        st.session_state.phase = 1
+        st.session_state.chat_history = []
         st.rerun()
 
-    col1, col2 = st.columns(2)
-    with col1:
-        st.download_button("📥 下載審核表 (Excel)", df_to_excel(edited_df), "審核表.xlsx", use_container_width=True)
-    with col2:
-        if st.button("⬅️ 重新上傳", use_container_width=True): 
-            st.session_state.step=1
-            st.rerun()
+st.markdown('<div class="custom-footer">© 2026 新竹市香山區內湖國小. All Rights Reserved.</div>', unsafe_allow_html=True)
