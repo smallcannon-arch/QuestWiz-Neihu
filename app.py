@@ -69,12 +69,11 @@ def extract_text_from_files(files):
             text_content += f"\n[讀取錯誤: {file.name} - {str(e)}]"
     return text_content
 
-# --- 3. 資料處理工具 (拆分為：解析 Markdown -> DF -> Excel) ---
+# --- 3. 資料處理工具 ---
 
 def parse_md_to_df(md_text):
-    """將 Markdown 表格解析為 Pandas DataFrame，並進行清洗與配分校正"""
+    """將 Markdown 表格解析為 Pandas DataFrame"""
     try:
-        # 1. 基礎清洗
         cleaned_text = md_text.replace("||", "|\n|")
         lines = cleaned_text.strip().split('\n')
         table_lines = []
@@ -91,7 +90,6 @@ def parse_md_to_df(md_text):
         
         if not table_lines: return None
 
-        # 2. 轉為 List
         data = []
         for line in table_lines:
             row = [cell.strip() for cell in line.strip('|').split('|')]
@@ -102,7 +100,6 @@ def parse_md_to_df(md_text):
         headers = data[0]
         rows = data[1:]
         
-        # 3. 補齊欄位
         max_cols = len(headers)
         cleaned_rows = []
         for r in rows:
@@ -112,7 +109,7 @@ def parse_md_to_df(md_text):
 
         df = pd.DataFrame(cleaned_rows, columns=headers)
         
-        # --- 🔥 清洗題型 (只留第一個) ---
+        # 清洗題型
         type_col = next((col for col in df.columns if "題型" in col), None)
         if type_col:
             def clean_type(x):
@@ -122,7 +119,7 @@ def parse_md_to_df(md_text):
                 return txt
             df[type_col] = df[type_col].apply(clean_type)
 
-        # --- 🔥 配分自動校正 ---
+        # 配分自動校正
         score_col = next((col for col in df.columns if "配分" in col), None)
         if score_col:
             try:
@@ -138,7 +135,6 @@ def parse_md_to_df(md_text):
                 
                 df[score_col] = df[score_col].round().astype(int)
                 
-                # 餘數分配
                 diff = 100 - df[score_col].sum()
                 if diff != 0:
                     max_idx = df[score_col].idxmax()
@@ -146,12 +142,10 @@ def parse_md_to_df(md_text):
             except: pass
             
         return df
-    except Exception as e:
-        print(f"解析失敗: {e}")
-        return None
+    except Exception as e: return None
 
 def df_to_excel(df):
-    """將 DataFrame 轉為美化的 Excel bytes"""
+    """將 DataFrame 轉為 Excel bytes"""
     try:
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
@@ -175,24 +169,73 @@ def df_to_excel(df):
             worksheet.set_column(3, 3, 10, num_format)
                 
         return output.getvalue()
-    except Exception as e:
-        return None
+    except Exception as e: return None
 
-# --- 4. 核心 Gem 命題鐵律 ---
+def df_to_string(df):
+    """將 DataFrame 轉為文字字串，供 Prompt 使用"""
+    if df is None: return ""
+    return df.to_markdown(index=False)
+
+# --- 4. Prompt 指令集 ---
+
+# Phase 1: 審核表生成指令
 GEM_INSTRUCTIONS_PHASE1 = """
 你是「國小專業定期評量命題 AI」。
+Phase 1 任務：閱讀教材，整理【學習目標審核表】。
 
-### ⚠️ Phase 1 任務目標：
-請閱讀使用者提供的教材內容，整理出一份【學習目標審核表】。
+絕對規則：
+1. **配分邏輯**：根據篇幅與重要性，分配總分剛好 100 分。
+2. **單一題型**：「對應題型」欄位只能選「一種」最適合的題型 (如：單選題)。
+3. **數字格式**：「預計配分」欄位只能填阿拉伯數字。
+4. **格式要求**：僅輸出 Markdown 表格。
+"""
 
-### 絕對規則：
-1. **配分邏輯**：請根據各單元內容的「篇幅長度」與「重要性」，將總分分配為 **剛好 100 分**。
-2. **單一題型**：「對應題型」欄位 **只能選擇「一種」最適合的題型** (例如：單選題)。
-3. **數字格式**：「預計配分」欄位 **只能填寫阿拉伯數字** (例如：10)。
-4. **格式要求**：
-   - 僅輸出標準 Markdown 表格。
-   - 欄位：| 單元名稱 | 學習目標(原文) | 對應題型 | 預計配分 |
-   - **每一列資料必須強制換行**。
+# Phase 3: 正式命題指令 (提取自你的需求)
+GEM_INSTRUCTIONS_PHASE3 = """
+你是「國小專業定期評量命題 AI」，精通 1-6 年級全科教材教法。
+Phase 3 任務：依據使用者確認的【試題審核表】與【命題模式】進行正式出題。
+
+### 1. 核心參數：試卷模式 (Mode)
+請依據輸入的模式調整命題邏輯：
+* **🟢 模式 A：適中 (Moderate)**
+    * 目標：基礎學力 (60% 記憶理解 + 40% 基礎應用)。
+    * 特徵：題幹直接，無複雜陷阱。
+* **🔴 模式 B：困難 (Hard)**
+    * 目標：邏輯細節 (30% 應用 + 70% 分析評鑑)。
+    * 特徵：多步驟解題、設有常見迷思陷阱。
+* **🌟 模式 C：素養 (Literacy)**
+    * 目標：接軌國際標準 (100% 情境解決問題)。
+    * 架構：數學/自然採 PISA/TIMSS 架構；國語/英語採 PIRLS 架構。
+    * 特徵：長篇情境、跨段落資訊整合。
+
+### 2. 命題鐵律
+* **總分**：必須嚴格遵守審核表中的配分，總分 100。
+* **視覺化**：若題目需要圖片或圖表：
+    * 數據表格：請生成 Markdown 表格。
+    * 圖像標記：請在題幹插入 `` 標籤 (例如: `
+
+[Image of simple circuit]
+`, `
+
+[Image of map of Taiwan]
+`)。
+* **選項品質**：干擾項必須合理，禁止「以上皆是/非」。
+
+### 3. 科目專屬規範 (Subject Kits)
+* **🀄 國語**：禁止主觀情緒形容詞當標準答案。
+* **🔢 數學**：單位必須一致或考換算；答案必能算得出來。
+* **🧪 自然**：實驗題必交代變因；符合生態邏輯。
+* **🌍 社會**：地圖題必標示 `
+
+[Image of map...]
+` 或圖例。
+* **🔤 英語**：對話必須真實，避免中式英文。
+
+### 4. 輸出格式
+請直接輸出試卷內容，包含題號、題目、選項、配分。
+格式範例：
+1. (單選題) 題目內容?  (3分)
+   (A) ... (B) ... (C) ... (D) ...
 """
 
 # --- 5. 智能模型設定 ---
@@ -202,11 +245,11 @@ def get_best_model(api_key, mode="fast"):
         models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
         if not models: return None, "找不到可用模型"
         target_model = None
-        if mode == "fast":
+        if mode == "fast": # Flash 模型 (速度快)
             for m in models:
                 if 'flash' in m.lower(): target_model = m; break
             if not target_model: target_model = models[0]
-        elif mode == "smart":
+        elif mode == "smart": # Pro 模型 (推理性強，適合 Phase 3)
             for m in models:
                 if 'pro' in m.lower() and '1.5' in m.lower(): target_model = m; break
             if not target_model: target_model = models[0]
@@ -272,8 +315,8 @@ st.markdown("""
 
 if "phase" not in st.session_state: st.session_state.phase = 1 
 if "chat_history" not in st.session_state: st.session_state.chat_history = []
-if "last_prompt_content" not in st.session_state: st.session_state.last_prompt_content = ""
 if "df_preview" not in st.session_state: st.session_state.df_preview = None
+if "final_exam_content" not in st.session_state: st.session_state.final_exam_content = ""
 
 # --- Sidebar ---
 with st.sidebar:
@@ -282,8 +325,8 @@ with st.sidebar:
     if st.button("🔄 重置系統"):
         st.session_state.phase = 1
         st.session_state.chat_history = []
-        st.session_state.last_prompt_content = ""
         st.session_state.df_preview = None
+        st.session_state.final_exam_content = ""
         st.rerun()
 
     st.markdown("### 📚 資源連結")
@@ -348,15 +391,15 @@ if st.session_state.phase == 1:
                             2. 依重要性與篇幅分配 100 分。
                             3. 輸出 Markdown 表格。
                             """
-                            st.session_state.last_prompt_content = prompt_content
                             response = generate_with_retry(chat, prompt_content, stream=False)
                             
                             if "|" in response.text and "單元" in response.text:
                                 st.session_state.chat_history.append({"role": "model", "content": response.text})
-                                # 預先解析成 DataFrame 並存入 Session
                                 st.session_state.df_preview = parse_md_to_df(response.text)
                                 st.session_state.phase = 2
-                                st.session_state.subject = subject # 記住科目以便 Phase 2 使用
+                                st.session_state.subject = subject 
+                                st.session_state.grade = grade
+                                st.session_state.mode = mode
                                 st.rerun()
                             else: st.error("❌ 格式異常，請重試")
                         except Exception as e: st.error(f"連線失敗：{e}")
@@ -365,23 +408,19 @@ if st.session_state.phase == 1:
 elif st.session_state.phase == 2:
     with st.container(border=True):
         st.markdown("### 📝 第二階段：審核與編輯")
-        st.info("請在下方表格直接修改「對應題型」或「學習目標」。確認無誤後再下載 Excel。")
+        st.info("請在下方表格直接修改「對應題型」或「學習目標」。確認無誤後，可先下載 Excel 存檔，或直接點擊下方按鈕出題。")
         
-        # 取得當前科目的可用題型
         current_subject = st.session_state.get("subject", "")
         valid_types = SUBJECT_Q_TYPES.get(current_subject, SUBJECT_Q_TYPES[""])
 
-        # 使用 Data Editor 讓使用者編輯
-        # 注意：我們把 "對應題型" 設為 Selectbox (下拉選單)
         if st.session_state.df_preview is not None:
             edited_df = st.data_editor(
                 st.session_state.df_preview,
                 column_config={
                     "對應題型": st.column_config.SelectboxColumn(
                         "對應題型",
-                        help="點擊選擇此題目的考試題型",
                         width="medium",
-                        options=valid_types,  # 這裡就是下拉選單的選項
+                        options=valid_types,
                         required=True,
                     ),
                     "預計配分": st.column_config.NumberColumn(
@@ -392,18 +431,19 @@ elif st.session_state.phase == 2:
                     )
                 },
                 use_container_width=True,
-                num_rows="dynamic", # 允許新增刪除列
+                num_rows="dynamic",
                 hide_index=True
             )
             
-            # 即時計算總分給使用者看
+            # 更新 session state 中的 dataframe
+            st.session_state.df_preview = edited_df
+
             total_score = edited_df["預計配分"].sum()
             if total_score != 100:
                 st.warning(f"⚠️ 目前總分：{total_score} 分 (建議調整為 100 分)")
             else:
                 st.success(f"✅ 目前總分：{total_score} 分")
 
-            # Excel 轉換 (使用編輯後的 DataFrame)
             excel_data = df_to_excel(edited_df)
             
             col1, col2 = st.columns([1, 1])
@@ -424,12 +464,99 @@ elif st.session_state.phase == 2:
                     st.rerun()
         else:
             st.error("⚠️ 資料遺失，請重新生成。")
-            if st.button("返回"):
-                st.session_state.phase = 1
-                st.rerun()
 
     st.divider()
+    
+    # --- Phase 3 入口 ---
     if st.button("✅ 審核無誤，開始正式命題 (Phase 3)", type="primary", use_container_width=True):
-        st.toast("🚀 進入 Phase 3...", icon="🚧")
+        if st.session_state.df_preview is None:
+            st.error("❌ 無法讀取審核表資料")
+        else:
+            st.session_state.phase = 3
+            st.rerun()
+
+# --- Phase 3: 正式出題 ---
+elif st.session_state.phase == 3:
+    with st.container(border=True):
+        st.markdown("### 🎓 第三階段：試題生成結果")
+        
+        # 顯示當前參數
+        mode_str = st.session_state.get('mode', '未定')
+        subject_str = st.session_state.get('subject', '未定')
+        st.caption(f"📍 目前模式：{mode_str} | 科目：{subject_str}")
+        
+        # 若尚未生成，則執行生成
+        if not st.session_state.final_exam_content:
+            with st.spinner("🧠 正在根據您的審核表與命題模式進行推理... (Pro 模型啟動中)"):
+                try:
+                    # 1. 準備 Pro 模型 (更聰明)
+                    keys = [k.strip() for k in api_input.replace('\n', ',').split(',') if k.strip()]
+                    target_key = random.choice(keys)
+                    model_smart_name, error_msg = get_best_model(target_key, mode="smart")
+                    
+                    if error_msg: st.error(f"模型載入失敗：{error_msg}")
+                    else:
+                        st.toast(f"切換至深度思考模式 ({model_smart_name})...", icon="💡")
+                        model_smart = genai.GenerativeModel(
+                            model_name=model_smart_name,
+                            system_instruction=GEM_INSTRUCTIONS_PHASE3
+                        )
+                        
+                        # 2. 將使用者編輯過的表格轉為文字
+                        df_str = df_to_string(st.session_state.df_preview)
+                        
+                        # 3. 組裝 Prompt
+                        final_prompt = f"""
+                        請根據以下【審核通過的架構表】進行命題。
+                        
+                        【基本資訊】
+                        年級：{st.session_state.get('grade')}
+                        科目：{st.session_state.get('subject')}
+                        命題模式：{st.session_state.get('mode')} (請嚴格遵守此模式的難度與特徵)
+                        
+                        【審核表 (請依此架構出題)】
+                        {df_str}
+                        
+                        【執行要求】
+                        1. 題目數量與配分需與表格完全一致。
+                        2. 若為素養模式，請務必設計情境題。
+                        3. 請包含  標籤以標示圖片需求。
+                        """
+                        
+                        # 4. 生成
+                        response = generate_with_retry(model_smart, final_prompt, stream=True)
+                        full_text = ""
+                        msg_placeholder = st.empty()
+                        
+                        for chunk in response:
+                            if chunk.text:
+                                full_text += chunk.text
+                                msg_placeholder.markdown(full_text + "▌")
+                        
+                        msg_placeholder.markdown(full_text)
+                        st.session_state.final_exam_content = full_text
+                        
+                except Exception as e:
+                    st.error(f"命題失敗：{e}")
+                    if st.button("重試"): st.rerun()
+        else:
+            # 若已生成，直接顯示
+            st.markdown(st.session_state.final_exam_content)
+
+        st.divider()
+        c1, c2 = st.columns([1, 1])
+        with c1:
+            st.download_button(
+                label="📥 下載試卷 (.txt)",
+                data=st.session_state.final_exam_content,
+                file_name=f"內湖國小_{st.session_state.get('subject')}_試卷初稿.txt",
+                mime="text/plain",
+                use_container_width=True
+            )
+        with c2:
+            if st.button("🔄 回到編輯台 (重新審核)", use_container_width=True):
+                st.session_state.phase = 2
+                st.session_state.final_exam_content = "" # 清空舊試卷
+                st.rerun()
 
 st.markdown('<div class="custom-footer">© 2026 新竹市香山區內湖國小. All Rights Reserved.</div>', unsafe_allow_html=True)
