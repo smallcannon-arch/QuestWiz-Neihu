@@ -6,3 +6,5 @@ python-docx
 python-pptx
 xlsxwriter
 openpyxl
+tabulate
+python-docx
